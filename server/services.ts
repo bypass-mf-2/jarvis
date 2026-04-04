@@ -2,7 +2,8 @@
  * Background services initializer.
  * Called once at server startup to kick off all scheduled background tasks.
  */
-
+import { startMemoryConsolidation } from "./persistentMemory.js";
+import { initializeDefaultSettings } from "./llmSettings.js";
 import { startVoiceLearning } from "./voiceLearning.js";
 import { startScraperScheduler, scrapeAllSources } from "./scraper";
 import { startSelfImprovementScheduler } from "./selfImprovement";
@@ -17,6 +18,16 @@ import {
 } from "./autonomousImprovement.js";
 import { startSourceDiscoveryScheduler } from "./sourceDiscovery.js";
 import { startAgentOptimization } from "./multiAgent.js";
+import {
+  collectTrainingExample,
+  exportTrainingData,
+  trainNewModel,
+  trainSpecializedModel,
+  getTrainingStats,
+  startAutoTraining,
+} from "./autoTrain.js";
+import { smartRouteModel } from "./autoTrain.js";
+import { startAutoTraining } from "./autoTrain.js";
 
 
 // Default RSS sources to seed on first run (16 high-quality feeds)
@@ -186,12 +197,145 @@ export async function initializeServices(): Promise<void> {
   const improvementInterval = parseInt(process.env.IMPROVEMENT_INTERVAL_MS ?? "21600000");
   startSelfImprovementScheduler(improvementInterval);
 
+
+
   await logger.info("services", "All background services initialized");
 }
 
 export async function startBackgroundServices() {
   // ... existing services
+
+
   
   // Start voice learning (updates daily)
   startVoiceLearning(24 * 60 * 60 * 1000);
+}
+
+
+export async function startBackgroundServices() {
+  // ... existing services
+  
+  // Initialize LLM settings
+  await initializeDefaultSettings();
+  
+  // Start memory consolidation (processes conversations hourly)
+  startMemoryConsolidation(60 * 60 * 1000);
+  
+  logger.info("services", "Persistent memory activated");
+}
+
+export async function startBackgroundServices() {
+  // Existing services
+  startScraperScheduler();
+  startSelfImprovementScheduler();
+  
+  // New services
+  await initializeDefaultSettings();
+  startMemoryConsolidation(60 * 60 * 1000);
+  
+  // One-time: Pull coding models
+  // await initializeCodingAI(); // Run this once manually
+  
+  logger.info("services", "All systems online - JARVIS God Mode activated");
+}
+
+// Training Router
+const trainingRouter = router({
+  rateMessage: publicProcedure
+    .input(z.object({
+      messageId: z.number(),
+      rating: z.number().min(1).max(5),
+    }))
+    .mutation(async ({ input }) => {
+      // Get message
+      const [message] = await db
+        .select()
+        .from(messages)
+        .where(eq(messages.id, input.messageId))
+        .limit(1);
+
+      if (!message) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
+
+      // Update message rating
+      await db
+        .update(messages)
+        .set({ userRating: input.rating })
+        .where(eq(messages.id, input.messageId));
+
+      // Collect as training example if high rating
+      if (input.rating >= 4 && message.role === "assistant") {
+        // Find the user message before this
+        const userMessage = await db
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, message.conversationId),
+              lt(messages.id, message.id)
+            )
+          )
+          .orderBy(desc(messages.id))
+          .limit(1);
+
+        if (userMessage[0]) {
+          await collectTrainingExample(
+            message.conversationId,
+            userMessage[0].content,
+            message.content,
+            input.rating
+          );
+        }
+      }
+
+      return { success: true };
+    }),
+
+  getStats: publicProcedure.query(async () => {
+    return await getTrainingStats();
+  }),
+
+  trainNewModel: publicProcedure.mutation(async () => {
+    // Export data
+    const dataPath = await exportTrainingData("general", 4, 1000);
+    
+    // Train (runs async, takes hours)
+    trainNewModel(dataPath).catch(err =>
+      logger.error("training", `Training failed: ${err}`)
+    );
+
+    return { success: true, message: "Training started in background" };
+  }),
+
+  trainSpecialized: publicProcedure
+    .input(z.object({
+      specialty: z.enum(["ios", "web", "data"]),
+    }))
+    .mutation(async ({ input }) => {
+      trainSpecializedModel(input.specialty).catch(err =>
+        logger.error("training", `Training failed: ${err}`)
+      );
+
+      return { 
+        success: true, 
+        specialty: input.specialty,
+        message: `${input.specialty} training started` 
+      };
+    }),
+});
+
+// Add to main router
+export const appRouter = router({
+  // ... existing routers
+  training: trainingRouter,
+});
+
+export async function startBackgroundServices() {
+  // ... existing services
+  
+  // Start auto-training (runs weekly)
+  startAutoTraining(7 * 24 * 60 * 60 * 1000); // Weekly
+  
+  logger.info("services", "🤖 Auto-training enabled - JARVIS will improve weekly");
 }

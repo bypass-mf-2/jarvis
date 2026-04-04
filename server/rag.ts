@@ -8,6 +8,9 @@
 import { queryVectorStore, type VectorSearchResult } from "./vectorStore";
 import { ollamaChat, ollamaChatStream, type OllamaMessage } from "./ollama";
 import { logger } from "./logger";
+import { getMemoryContext } from "./persistentMemory";
+import { searchWeb } from "./webSearch.js";
+import { smartRouteModel } from "./autoTrain.js";
 
 const JARVIS_SYSTEM_PROMPT = `You are JARVIS (Just A Rather Very Intelligent System), a highly capable AI assistant inspired by Tony Stark's AI. You are helpful, precise, and occasionally witty. You have access to a continuously updated knowledge base scraped from the internet.
 
@@ -27,7 +30,23 @@ async function buildAugmentedMessages(
   // Retrieve relevant knowledge
   const ragChunks = await queryVectorStore(userMessage, topK);
 
+  // ✅ ADD THIS: Get persistent memory
+  const memoryContext = await getMemoryContext(userMessage);
+
+  // Optionally: Web search for current info
+  let webContext = "";
+  if (useWebSearch) {
+    const searchResults = await searchWeb(userMessage, 3);
+    webContext = `\n\n=== WEB SEARCH RESULTS ===\n` +
+      searchResults.map(r => `${r.title}: ${r.snippet}`).join("\n\n");
+  }
+
   let systemContent = JARVIS_SYSTEM_PROMPT;
+
+    // ✅ ADD THIS: Include memory in system prompt
+  if (memoryContext) {
+    systemContent += "\n\n" + memoryContext;
+  }
 
   if (ragChunks.length > 0) {
     const contextBlock = ragChunks
@@ -38,6 +57,11 @@ async function buildAugmentedMessages(
       .join("\n\n---\n\n");
 
     systemContent += `\n\n=== KNOWLEDGE BASE CONTEXT ===\nThe following information was retrieved from your knowledge base. Use it to inform your response:\n\n${contextBlock}\n\n=== END CONTEXT ===`;
+  }
+
+  // Add web search
+  if (webContext) {
+    systemContent += webContext;
   }
 
   const messages: OllamaMessage[] = [
@@ -61,8 +85,9 @@ export async function ragChat(
     userMessage,
     conversationHistory
   );
-
-  const response = await ollamaChat(messages, model);
+  //Sm
+  // art model selection (unless overridden)
+  const model = modelOverride || await smartRouteModel(userMessage);
 
   await logger.info("rag", `Response generated, used ${ragChunks.length} RAG chunks`);
 

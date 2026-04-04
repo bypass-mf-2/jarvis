@@ -36,6 +36,23 @@ import { runSelfAnalysis, applyPatch } from "./selfImprovement";
 import { isOllamaAvailable, listOllamaModels } from "./ollama";
 import { seedDefaultSources } from "./services";
 import { transcribeAudio } from "./_core/voiceTranscription";
+import { processConversationMemory } from "./persistentMemory.js";
+import {
+  getAllSettings,
+  getSetting,
+  setSetting,
+  applyPreset,
+  PRESETS,
+} from "./llmSettings.js";
+import {
+  recallRelevantFacts,
+  recallEntities,
+} from "./persistentMemory.js";
+import { generateImage } from "./imageGeneration.js";
+import { cloneTrevorsVoice } from "./voiceCloning.js";
+import { executeCode, testCode } from "./codeExecution.js";
+import { generateCode, reviewCode, explainCode, fixCode } from "./codingAI.js";
+import { searchWeb, searchAndSummarize } from "./webSearch.js";
 
 // ── Chat Router ───────────────────────────────────────────────────────────────
 const chatRouter = router({
@@ -103,6 +120,11 @@ const chatRouter = router({
           distance: c.distance,
         })),
       });
+
+      // ✅ ADD THIS: Process memory in background
+      processConversationMemory(input.conversationId).catch(err =>
+        logger.error("memory", `Background memory processing failed: ${err}`)
+      );
 
       // Auto-title conversation after first exchange
       const msgs = await getMessages(input.conversationId);
@@ -318,5 +340,192 @@ export const appRouter = router({
   voice: voiceRouter,
 });
 
+// Memory Router
+const memoryRouter = router({
+  getFacts: publicProcedure
+    .input(z.object({ query: z.string().optional(), limit: z.number().optional() }))
+    .query(async ({ input }) => {
+      if (!input.query) {
+        // Get all facts
+        return db.select().from(learnedFacts).limit(input.limit || 50);
+      }
+      return recallRelevantFacts(input.query, input.limit || 10);
+    }),
+  
+  getEntities: publicProcedure
+    .input(z.object({ query: z.string().optional(), limit: z.number().optional() }))
+    .query(async ({ input }) => {
+      if (!input.query) {
+        return db.select().from(entityMemory).limit(input.limit || 50);
+      }
+      return recallEntities(input.query, input.limit || 10);
+    }),
+  
+  processConversation: publicProcedure
+    .input(z.object({ conversationId: z.number() }))
+    .mutation(async ({ input }) => {
+      await processConversationMemory(input.conversationId);
+      return { success: true };
+    }),
+});
+
+// LLM Settings Router
+const llmRouter = router({
+  getSettings: publicProcedure
+    .query(async () => {
+      return await getAllSettings();
+    }),
+  
+  getSetting: publicProcedure
+    .input(z.object({ name: z.string() }))
+    .query(async ({ input }) => {
+      return await getSetting(input.name);
+    }),
+  
+  setSetting: publicProcedure
+    .input(z.object({
+      name: z.string(),
+      value: z.string(),
+      type: z.enum(["string", "number", "boolean", "json"]).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      await setSetting(input.name, input.value, input.type || "string");
+      return { success: true };
+    }),
+  
+  getPresets: publicProcedure
+    .query(() => {
+      return PRESETS;
+    }),
+  
+  applyPreset: publicProcedure
+    .input(z.object({ preset: z.string() }))
+    .mutation(async ({ input }) => {
+      await applyPreset(input.preset as any);
+      return { success: true };
+    }),
+});
+
+// Add to appRouter
+export const appRouter = router({
+  // ... existing
+  memory: memoryRouter,
+  llm: llmRouter,
+});
+
+// Image Generation Router
+const imageRouter = router({
+  generate: publicProcedure
+    .input(z.object({ 
+      prompt: z.string(),
+      preferLocal: z.boolean().optional()
+    }))
+    .mutation(async ({ input }) => {
+      const result = await generateImage(input.prompt, input.preferLocal);
+      return result;
+    }),
+});
+
+// Voice Router
+const voiceRouter = router({
+  clone: publicProcedure
+    .input(z.object({ text: z.string() }))
+    .mutation(async ({ input }) => {
+      const filepath = await cloneTrevorsVoice(input.text);
+      return { filepath };
+    }),
+  
+  analyzeStyle: publicProcedure
+    .mutation(async () => {
+      return await analyzeWritingStyle();
+    }),
+  
+  writeInMyVoice: publicProcedure
+    .input(z.object({
+      topic: z.string(),
+      length: z.enum(["short", "medium", "long"]).optional(),
+      type: z.enum(["essay", "story", "analysis", "chapter"]).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return await writeInTrevorsVoice(input.topic, input.length, input.type);
+    }),
+});
+
+// Code Execution Router
+const codeRouter = router({
+  execute: publicProcedure
+    .input(z.object({
+      code: z.string(),
+      language: z.enum(["javascript", "python", "swift"]).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return await executeCode(input.code, input.language);
+    }),
+  
+  generate: publicProcedure
+    .input(z.object({
+      task: z.string(),
+      language: z.enum(["swift", "python", "javascript", "typescript", "java", "cpp"]),
+      includeTests: z.boolean().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return await generateCode(input.task, input.language, input.includeTests);
+    }),
+  
+  review: publicProcedure
+    .input(z.object({
+      code: z.string(),
+      language: z.enum(["swift", "python", "javascript", "typescript"]),
+    }))
+    .mutation(async ({ input }) => {
+      return await reviewCode(input.code, input.language);
+    }),
+  
+  explain: publicProcedure
+    .input(z.object({
+      code: z.string(),
+      language: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      return await explainCode(input.code, input.language);
+    }),
+  
+  fix: publicProcedure
+    .input(z.object({
+      code: z.string(),
+      error: z.string(),
+      language: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      return await fixCode(input.code, input.error, input.language);
+    }),
+});
+
+// Web Search Router
+const searchRouter = router({
+  web: publicProcedure
+    .input(z.object({
+      query: z.string(),
+      maxResults: z.number().optional(),
+    }))
+    .query(async ({ input }) => {
+      return await searchWeb(input.query, input.maxResults);
+    }),
+  
+  summarize: publicProcedure
+    .input(z.object({ query: z.string() }))
+    .query(async ({ input }) => {
+      return await searchAndSummarize(input.query);
+    }),
+});
+
+// Add to main router
+export const appRouter = router({
+  // ... existing routers
+  image: imageRouter,
+  voice: voiceRouter,
+  code: codeRouter,
+  search: searchRouter,
+});
 
 export type AppRouter = typeof appRouter;

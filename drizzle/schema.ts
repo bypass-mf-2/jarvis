@@ -148,3 +148,123 @@ export const agentMetrics = mysqlTable("agent_metrics", {
   errorRate: decimal("error_rate", { precision: 3, scale: 2 }),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
+
+// ─── Persistent Memory Tables ───────────────────────────────────────────────
+
+export const learnedFacts = mysqlTable("learned_facts", {
+  id: int("id").autoincrement().primaryKey(),
+  category: mysqlEnum("category", [
+    "personal", "preferences", "knowledge", "goals", 
+    "relationships", "experiences", "skills"
+  ]).notNull(),
+  fact: text("fact").notNull(),
+  confidence: decimal("confidence", { precision: 3, scale: 2 }).notNull(),
+  sourceConversationId: int("sourceConversationId"),
+  verified: boolean("verified").default(false),
+  timesReferenced: int("timesReferenced").default(0),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const entityMemory = mysqlTable("entity_memory", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  type: mysqlEnum("type", ["person", "place", "organization", "concept", "event", "object"]).notNull(),
+  description: text("description"),
+  attributes: json("attributes"),
+  relationships: json("relationships"),
+  firstMentioned: timestamp("firstMentioned").defaultNow(),
+  lastMentioned: timestamp("lastMentioned").defaultNow(),
+  mentionCount: int("mentionCount").default(1),
+  importance: decimal("importance", { precision: 3, scale: 2 }).default("0.50"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const conversationContext = mysqlTable("conversation_context", {
+  id: int("id").autoincrement().primaryKey(),
+  conversationId: int("conversationId").notNull(),
+  topicSummary: text("topicSummary"),
+  extractedFacts: json("extractedFacts"),
+  entities: json("entities"),
+  sentiment: mysqlEnum("sentiment", ["positive", "neutral", "negative"]),
+  keyTopics: json("keyTopics"),
+  followUpNeeded: boolean("followUpNeeded").default(false),
+  followUpTopic: text("followUpTopic"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const fileUploads = mysqlTable("file_uploads", {
+  id: int("id").autoincrement().primaryKey(),
+  filename: varchar("filename", { length: 512 }).notNull(),
+  originalPath: varchar("originalPath", { length: 1024 }).notNull(),
+  fileType: varchar("fileType", { length: 64 }).notNull(),
+  fileSize: int("fileSize").notNull(),
+  processed: boolean("processed").default(false),
+  processingStatus: mysqlEnum("processingStatus", ["pending", "processing", "complete", "error"]).default("pending"),
+  chunksExtracted: int("chunksExtracted").default(0),
+  metadata: json("metadata"),
+  uploadedAt: timestamp("uploadedAt").defaultNow().notNull(),
+  processedAt: timestamp("processedAt"),
+});
+
+export const llmSettings = mysqlTable("llm_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId"),
+  settingName: varchar("settingName", { length: 128 }).notNull(),
+  settingValue: text("settingValue").notNull(),
+  settingType: mysqlEnum("settingType", ["string", "number", "boolean", "json"]).notNull(),
+  description: text("description"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const learningSessions = mysqlTable("learning_sessions", {
+  id: int("id").autoincrement().primaryKey(),
+  sessionType: mysqlEnum("sessionType", [
+    "conversation_analysis", "file_processing", "web_scraping", 
+    "voice_analysis", "self_improvement"
+  ]).notNull(),
+  itemsProcessed: int("itemsProcessed").default(0),
+  factsLearned: int("factsLearned").default(0),
+  entitiesDiscovered: int("entitiesDiscovered").default(0),
+  duration: int("duration"),
+  status: mysqlEnum("status", ["success", "partial", "error"]).default("success"),
+  notes: text("notes"),
+  startedAt: timestamp("startedAt").defaultNow().notNull(),
+  completedAt: timestamp("completedAt"),
+});
+
+// Add to existing messages table:
+export const messages = mysqlTable("messages", {
+  // ... existing fields
+  userRating: int("userRating"), // ADD THIS
+});
+
+// Add new tables:
+export const trainingExamples = mysqlTable("training_examples", {
+  id: int("id").autoincrement().primaryKey(),
+  conversationId: int("conversationId"),
+  instruction: text("instruction").notNull(),
+  output: text("output").notNull(),
+  rating: int("rating").notNull(),
+  category: mysqlEnum("category", ["ios", "web", "data", "general"]).default("general"),
+  usedInTraining: boolean("usedInTraining").default(false),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export const modelVersions = mysqlTable("model_versions", {
+  id: int("id").autoincrement().primaryKey(),
+  modelName: varchar("modelName", { length: 255 }).notNull(),
+  baseModel: varchar("baseModel", { length: 255 }).notNull(),
+  specialty: mysqlEnum("specialty", ["ios", "web", "data", "general"]).default("general"),
+  trainingExamples: int("trainingExamples").default(0),
+  status: mysqlEnum("status", ["training", "trained", "deployed", "archived"]).default("training"),
+  performanceScore: decimal("performanceScore", { precision: 3, scale: 2 }),
+  abTestWins: int("abTestWins").default(0),
+  abTestLosses: int("abTestLosses").default(0),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  deployedAt: timestamp("deployedAt"),
+});

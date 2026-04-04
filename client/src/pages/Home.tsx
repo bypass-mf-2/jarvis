@@ -17,7 +17,7 @@ import {
   Upload
 } from "lucide-react";
 import { FileUploadPanel } from "@/components/FileUploadPanel";
-
+import { MessageRating } from "@/components/TrainingComponents";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Message = {
@@ -35,7 +35,7 @@ type Conversation = {
   createdAt: Date;
 };
 
-type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs";
+type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "upload" | "training";
 
 // ── Status Dot ────────────────────────────────────────────────────────────────
 function StatusDot({ ok }: { ok: boolean }) {
@@ -163,26 +163,138 @@ export default function Home() {
   }, [convData?.messages, streamedResponse]);
 
   // Add a new side panel option
-type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "upload";
-
-// In your panel rendering section:
-{sidePanel === "upload" && (
-  <FileUploadPanel />
+// For Knowledge Panel (around line 600):
+{sidePanel === "knowledge" && (
+  <>
+    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSidePanel("chat")}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </Button>
+        <Database className="w-4 h-4 text-primary" />
+        <span className="font-semibold text-sm">Knowledge Base</span>
+      </div>
+      <Badge variant="secondary" className="text-xs">
+        {status?.knowledge?.totalChunks ?? 0} chunks
+      </Badge>
+    </div>
+    {/* rest of knowledge panel */}
+  </>
 )}
 
-// Add upload icon to toolbar:
+// For Scraper Panel (around line 650):
+{sidePanel === "scraper" && (
+  <>
+    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSidePanel("chat")}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </Button>
+        <Rss className="w-4 h-4 text-primary" />
+        <span className="font-semibold text-sm">Web Scraper</span>
+      </div>
+      <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
+        onClick={() => scrapeNow.mutate({})} disabled={scrapeNow.isPending}>
+        <RefreshCw className={`w-3 h-3 ${scrapeNow.isPending ? "animate-spin" : ""}`} />
+        Scrape All
+      </Button>
+    </div>
+    {/* rest of scraper panel */}
+  </>
+)}
+
+// For Self-Improvement Panel (around line 710):
+{sidePanel === "improvement" && (
+  <>
+    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSidePanel("chat")}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </Button>
+        <Zap className="w-4 h-4 text-primary" />
+        <span className="font-semibold text-sm">Self-Improvement</span>
+      </div>
+      {/* rest of header */}
+    </div>
+    {/* rest of improvement panel */}
+  </>
+)}
+
+// For Logs Panel (around line 770):
+{sidePanel === "logs" && (
+  <>
+    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSidePanel("chat")}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </Button>
+        <Activity className="w-4 h-4 text-primary" />
+        <span className="font-semibold text-sm">System Logs</span>
+      </div>
+    </div>
+    {/* rest of logs panel */}
+  </>
+)}
+
+// Add Upload Panel (add this new section around line 800):
+{sidePanel === "upload" && (
+  <>
+    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSidePanel("chat")}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </Button>
+        <Upload className="w-4 h-4 text-primary" />
+        <span className="font-semibold text-sm">File Upload</span>
+      </div>
+    </div>
+    <FileUploadPanel />
+  </>
+)}
+
+// In panel rendering:
+{sidePanel === "training" && (
+  <TrainingDashboard />
+)}
+
+// Add button to toolbar:
 <Tooltip>
   <TooltipTrigger asChild>
     <Button
       variant="ghost"
       size="icon"
-      className={`h-8 w-8 ${sidePanel === "upload" ? "text-primary" : ""}`}
-      onClick={() => setSidePanel("upload")}
+      className={`h-8 w-8 ${sidePanel === "training" ? "text-primary" : ""}`}
+      onClick={() => setSidePanel("training")}
     >
-      <Upload className="w-4 h-4" />
+      <Brain className="w-4 h-4" />
     </Button>
   </TooltipTrigger>
-  <TooltipContent>Upload Files</TooltipContent>
+  <TooltipContent>Training Dashboard</TooltipContent>
 </Tooltip>
 
   // ── Send message ─────────────────────────────────────────────────────────────
@@ -191,36 +303,42 @@ type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "up
   }, [isSending]);
 
   const handleSend = useCallback(async () => {
-    if (!input.trim() || isSendingRef.current) return;
+  if (!input.trim() || isSendingRef.current) return;
 
-    let convId = activeConvId;
-    if (!convId) {
-      const conv = await createConv.mutateAsync({});
-      convId = conv?.id ?? null;
-      if (!convId) return;
-      setActiveConvId(convId); // <-- ADD THIS LINE
-      await new Promise(r => setTimeout(r, 100)); // <-- AND THIS
+  let convId = activeConvId;
+  
+  // If no active conversation, create one
+  if (!convId) {
+    const conv = await createConv.mutateAsync({});
+    convId = conv?.id ?? null;
+    if (!convId) return;
+    
+    // ✅ ADD THESE TWO LINES:
+    setActiveConvId(convId);
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  const text = input.trim();
+  setInput("");
+  setIsSending(true);
+
+  sendMessage.mutate(
+    { conversationId: convId, content: text },
+    {
+      onSuccess: (data) => {
+        setIsSending(false);
+        refetchMessages(); // ✅ ADD THIS LINE
+        if (voiceEnabled && data.message?.content) {
+          speakText(data.message.content);
+        }
+      },
+      onError: () => {
+        setIsSending(false);
+      },
     }
+  );
+}, [input, activeConvId, voiceEnabled, refetchMessages]); // ✅ ADD refetchMessages to deps
 
-    const text = input.trim();
-    setInput("");
-    setIsSending(true);
-
-    sendMessage.mutate(
-      { conversationId: convId, content: text },
-      {
-        onSuccess: (data) => {
-          setIsSending(false);
-          if (voiceEnabled && data.message?.content) {
-            speakText(data.message.content);
-          }
-        },
-        onError: () => {
-          setIsSending(false);
-        },
-      }
-    );
-  }, [input, activeConvId, voiceEnabled, refetchMessages]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -412,6 +530,21 @@ type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "up
 
             <Separator orientation="vertical" className="h-6 mx-1" />
 
+            {/* ADD THIS: */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={`h-8 w-8 ${sidePanel === "upload" ? "text-primary" : ""}`}
+                  onClick={() => setSidePanel("upload")}
+                >
+                  <Upload className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Upload Files</TooltipContent>
+            </Tooltip>
+
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -511,6 +644,10 @@ type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "up
                 {msg.role === "assistant" ? (
                   <div className="prose prose-sm max-w-none text-foreground">
                     <Streamdown>{msg.content}</Streamdown>
+                    <MessageRating 
+                        messageId={msg.id} 
+                        currentRating={msg.userRating}
+                      />
                   </div>
                 ) : (
                   <p className="text-sm whitespace-pre-wrap">{msg.content}</p>

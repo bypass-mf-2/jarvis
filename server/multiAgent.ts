@@ -1,464 +1,703 @@
 /**
- * Multi-Agent Orchestration System
+ * Multi-Agent Swarm System
  * 
- * Specialized agents for different tasks:
- * - Research Agent: Deep web research and fact-checking
- * - Code Agent: Code analysis, generation, and review
- * - Analysis Agent: Data analysis and pattern recognition
- * - Planning Agent: Strategic planning and task decomposition
- * - Memory Agent: Context management and retrieval optimization
+ * 20 specialized agents working in parallel:
+ * - Research Agents (5) - Gather information
+ * - Analysis Agents (3) - Deep analysis
+ * - Coding Agents (4) - Generate and review code
+ * - Planning Agents (2) - Strategy and roadmaps
+ * - Execution Agents (3) - Run tasks
+ * - Memory Agents (2) - Manage knowledge
+ * - QA Agents (1) - Quality assurance
  * 
- * The orchestrator routes queries to appropriate agents and combines results.
+ * All agents can work simultaneously on complex tasks
  */
 
-import { ollamaChat, ollamaChatStream, type OllamaMessage } from "./ollama";
-import { queryVectorStore } from "./vectorStore";
-import { logger } from "./logger";
-import { getRecentErrorLogs, getSystemLogs } from "./db";
+import { ollamaChat } from "./ollama.js";
+import { logger } from "./logger.js";
+import { searchWeb } from "./webSearch.js";
+import { generateCode, reviewCode } from "./codingAI.js";
+import { executeCode } from "./codeExecution.js";
+import { getMemoryContext, recallRelevantFacts } from "./persistentMemory.js";
 
-// ── Agent Definitions ──────────────────────────────────────────────────────────
+// ── Agent Types ─────────────────────────────────────────────────────────────
+type AgentRole = 
+  | "researcher"
+  | "analyst" 
+  | "coder"
+  | "planner"
+  | "executor"
+  | "memory_keeper"
+  | "qa_specialist";
+
 interface Agent {
+  id: string;
+  role: AgentRole;
   name: string;
-  role: string;
-  systemPrompt: string;
-  capabilities: string[];
-  priority: number; // Higher = more likely to be selected
+  status: "idle" | "thinking" | "working" | "complete" | "error";
+  currentTask: string | null;
+  specialization: string;
+  model: string; // Which LLM to use
+  performance: {
+    tasksCompleted: number;
+    successRate: number;
+    avgResponseTime: number;
+  };
 }
 
-const AGENTS: Record<string, Agent> = {
-  research: {
-    name: "Research Agent",
-    role: "research",
-    systemPrompt: `You are JARVIS's Research Agent. You specialize in:
-- Deep web research across multiple sources
-- Fact-checking and source verification
-- Synthesizing information from diverse sources
-- Identifying knowledge gaps
-- Tracking claims to original sources
-
-Always cite sources and evaluate information quality.`,
-    capabilities: ["research", "fact-check", "synthesis", "analysis"],
-    priority: 8,
-  },
-
-  code: {
-    name: "Code Agent",
-    role: "code",
-    systemPrompt: `You are JARVIS's Code Agent. You specialize in:
-- Code analysis and review
-- Bug detection and fixes
-- Performance optimization
-- Architecture design
-- Test generation
-- Code explanation
-
-Always follow best practices and consider edge cases.`,
-    capabilities: ["code", "debug", "optimize", "review", "test"],
-    priority: 9,
-  },
-
-  analysis: {
-    name: "Analysis Agent",
-    role: "analysis",
-    systemPrompt: `You are JARVIS's Analysis Agent. You specialize in:
-- Data analysis and pattern recognition
-- Statistical reasoning
-- Trend identification
-- Anomaly detection
-- Predictive insights
-
-Always ground analysis in data and quantify confidence.`,
-    capabilities: ["analyze", "pattern", "trend", "predict", "quantify"],
-    priority: 7,
-  },
-
-  planning: {
-    name: "Planning Agent",
-    role: "planning",
-    systemPrompt: `You are JARVIS's Planning Agent. You specialize in:
-- Task decomposition and sequencing
-- Resource estimation
-- Risk assessment
-- Strategic planning
-- Dependency management
-
-Always create actionable, prioritized plans.`,
-    capabilities: ["plan", "organize", "strategy", "prioritize", "estimate"],
-    priority: 6,
-  },
-
-  memory: {
-    name: "Memory Agent",
-    role: "memory",
-    systemPrompt: `You are JARVIS's Memory Agent. You specialize in:
-- Context retrieval and relevance ranking
-- Knowledge graph construction
-- Entity relationship mapping
-- Temporal reasoning
-- Information organization
-
-Always optimize for recall and relevance.`,
-    capabilities: ["remember", "recall", "organize", "relate", "track"],
-    priority: 5,
-  },
-
-  general: {
-    name: "General Agent",
-    role: "general",
-    systemPrompt: `You are JARVIS (Just A Rather Very Intelligent System). You are helpful, precise, and versatile. Handle general queries with clarity and efficiency.`,
-    capabilities: ["general", "chat", "help", "explain"],
-    priority: 3,
-  },
-};
-
-// ── Agent Selection ────────────────────────────────────────────────────────────
-async function selectAgent(query: string): Promise<Agent> {
-  // Use LLM to classify the query
-  const prompt = `Classify this query into one of these categories:
-
-Query: "${query}"
-
-Categories:
-- research: Requires web research, fact-checking, or information synthesis
-- code: Involves programming, debugging, or technical implementation
-- analysis: Needs data analysis, pattern recognition, or statistical reasoning
-- planning: Requires task breakdown, scheduling, or strategic planning
-- memory: About recalling past information or organizing knowledge
-- general: General conversation or simple questions
-
-Respond with ONLY the category name, nothing else.`;
-
-  try {
-    const response = await ollamaChat([{ role: "user", content: prompt }]);
-    const category = response.toLowerCase().trim();
-    
-    // Find matching agent
-    for (const [key, agent] of Object.entries(AGENTS)) {
-      if (category.includes(key) || agent.capabilities.some(cap => category.includes(cap))) {
-        return agent;
-      }
-    }
-  } catch (err) {
-    await logger.warn("multiAgent", `Agent selection failed: ${String(err)}`);
-  }
-
-  return AGENTS.general;
-}
-
-// ── Task Decomposition ─────────────────────────────────────────────────────────
-interface Subtask {
+interface Task {
+  id: string;
   description: string;
-  agent: string;
-  dependencies: number[]; // Indices of tasks that must complete first
-  priority: number;
+  type: "research" | "analyze" | "code" | "plan" | "execute" | "remember" | "qa";
+  assignedAgent: string | null;
+  status: "pending" | "in_progress" | "complete" | "failed";
+  priority: number; // 1-10
+  result: any;
+  startTime?: Date;
+  endTime?: Date;
 }
 
-async function decomposeComplexTask(query: string): Promise<Subtask[]> {
-  const prompt = `Decompose this complex task into subtasks:
+// ── Agent Definitions ───────────────────────────────────────────────────────
+const AGENT_POOL: Agent[] = [
+  // Research Agents (5)
+  {
+    id: "researcher-1",
+    role: "researcher",
+    name: "WebScout",
+    status: "idle",
+    currentTask: null,
+    specialization: "Web search and information gathering",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "researcher-2",
+    role: "researcher",
+    name: "DataMiner",
+    status: "idle",
+    currentTask: null,
+    specialization: "Data extraction and parsing",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "researcher-3",
+    role: "researcher",
+    name: "Scholar",
+    status: "idle",
+    currentTask: null,
+    specialization: "Academic and technical research",
+    model: "llama3.1:70b",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "researcher-4",
+    role: "researcher",
+    name: "NewsHound",
+    status: "idle",
+    currentTask: null,
+    specialization: "Current events and news",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "researcher-5",
+    role: "researcher",
+    name: "SourceValidator",
+    status: "idle",
+    currentTask: null,
+    specialization: "Fact-checking and source validation",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
 
-Task: "${query}"
+  // Analysis Agents (3)
+  {
+    id: "analyst-1",
+    role: "analyst",
+    name: "Strategist",
+    status: "idle",
+    currentTask: null,
+    specialization: "Strategic analysis and recommendations",
+    model: "llama3.1:70b",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "analyst-2",
+    role: "analyst",
+    name: "Critic",
+    status: "idle",
+    currentTask: null,
+    specialization: "Critical evaluation and improvement suggestions",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "analyst-3",
+    role: "analyst",
+    name: "Synthesizer",
+    status: "idle",
+    currentTask: null,
+    specialization: "Combining insights from multiple sources",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
 
-Create a JSON array of subtasks:
-[{
-  "description": "Subtask description",
-  "agent": "research|code|analysis|planning|memory|general",
-  "dependencies": [index of required prior tasks],
-  "priority": 1-10
-}]
+  // Coding Agents (4)
+  {
+    id: "coder-1",
+    role: "coder",
+    name: "SwiftMaster",
+    status: "idle",
+    currentTask: null,
+    specialization: "iOS and Swift development",
+    model: "codellama:7b-instruct",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "coder-2",
+    role: "coder",
+    name: "PythonPro",
+    status: "idle",
+    currentTask: null,
+    specialization: "Python and data science",
+    model: "codellama:7b-python",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "coder-3",
+    role: "coder",
+    name: "FullStack",
+    status: "idle",
+    currentTask: null,
+    specialization: "Web development (JavaScript/TypeScript)",
+    model: "codellama:7b-instruct",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "coder-4",
+    role: "coder",
+    name: "CodeReviewer",
+    status: "idle",
+    currentTask: null,
+    specialization: "Code review and optimization",
+    model: "codellama:7b-instruct",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
 
-Return only the JSON array. For simple tasks, return a single subtask.`;
+  // Planning Agents (2)
+  {
+    id: "planner-1",
+    role: "planner",
+    name: "Architect",
+    status: "idle",
+    currentTask: null,
+    specialization: "System architecture and design",
+    model: "llama3.1:70b",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "planner-2",
+    role: "planner",
+    name: "TaskMaster",
+    status: "idle",
+    currentTask: null,
+    specialization: "Task breakdown and workflow planning",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+
+  // Execution Agents (3)
+  {
+    id: "executor-1",
+    role: "executor",
+    name: "Runner",
+    status: "idle",
+    currentTask: null,
+    specialization: "Code execution and testing",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "executor-2",
+    role: "executor",
+    name: "Automator",
+    status: "idle",
+    currentTask: null,
+    specialization: "Workflow automation",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "executor-3",
+    role: "executor",
+    name: "Coordinator",
+    status: "idle",
+    currentTask: null,
+    specialization: "Multi-step task coordination",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+
+  // Memory Agents (2)
+  {
+    id: "memory-1",
+    role: "memory_keeper",
+    name: "Archivist",
+    status: "idle",
+    currentTask: null,
+    specialization: "Long-term knowledge storage and retrieval",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+  {
+    id: "memory-2",
+    role: "memory_keeper",
+    name: "Librarian",
+    status: "idle",
+    currentTask: null,
+    specialization: "Knowledge organization and categorization",
+    model: "llama3.2",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+
+  // QA Agent (1)
+  {
+    id: "qa-1",
+    role: "qa_specialist",
+    name: "Validator",
+    status: "idle",
+    currentTask: null,
+    specialization: "Quality assurance and verification",
+    model: "llama3.1:70b",
+    performance: { tasksCompleted: 0, successRate: 1.0, avgResponseTime: 0 },
+  },
+];
+
+// ── Task Queue ──────────────────────────────────────────────────────────────
+const taskQueue: Task[] = [];
+const activeTasks = new Map<string, Task>();
+
+// ── Decompose Complex Query ────────────────────────────────────────────────
+export async function decomposeQuery(query: string): Promise<Task[]> {
+  await logger.info("agentSwarm", `Decomposing query: ${query}`);
+
+  const prompt = `Break down this complex query into specific, actionable tasks:
+
+Query: ${query}
+
+Return as JSON array:
+[
+  {
+    "description": "Task description",
+    "type": "research|analyze|code|plan|execute|remember|qa",
+    "priority": 1-10,
+    "dependencies": [] // IDs of tasks that must complete first
+  }
+]
+
+Each task should be:
+- Specific and focused
+- Independently executable
+- Have clear success criteria
+
+Return ONLY the JSON array.`;
 
   try {
-    const response = await ollamaChat([{ role: "user", content: prompt }]);
+    const response = await ollamaChat(
+      [{ role: "user", content: prompt }],
+      "llama3.1:70b" // Use best model for planning
+    );
+
     const jsonMatch = response.match(/\[[\s\S]*\]/);
-    
-    if (jsonMatch) {
-      const subtasks: Subtask[] = JSON.parse(jsonMatch[0]);
-      return subtasks.filter(st => st.description && st.agent);
+    if (!jsonMatch) {
+      throw new Error("Failed to parse task decomposition");
     }
+
+    const taskDefinitions = JSON.parse(jsonMatch[0]);
+
+    const tasks: Task[] = taskDefinitions.map((def: any, idx: number) => ({
+      id: `task-${Date.now()}-${idx}`,
+      description: def.description,
+      type: def.type,
+      assignedAgent: null,
+      status: "pending",
+      priority: def.priority || 5,
+      result: null,
+    }));
+
+    return tasks;
+
   } catch (err) {
-    await logger.warn("multiAgent", `Task decomposition failed: ${String(err)}`);
+    await logger.error("agentSwarm", `Task decomposition failed: ${err}`);
+    
+    // Fallback: Create single task
+    return [{
+      id: `task-${Date.now()}`,
+      description: query,
+      type: "research",
+      assignedAgent: null,
+      status: "pending",
+      priority: 5,
+      result: null,
+    }];
   }
-
-  // Fallback: single task
-  return [{
-    description: query,
-    agent: "general",
-    dependencies: [],
-    priority: 5,
-  }];
 }
 
-// ── Agent Execution ────────────────────────────────────────────────────────────
-interface AgentResult {
-  agent: string;
-  content: string;
-  confidence: number;
-  sources?: string[];
+// ── Assign Tasks to Agents ──────────────────────────────────────────────────
+function assignTask(task: Task): Agent | null {
+  // Find best available agent for this task type
+  const availableAgents = AGENT_POOL.filter(
+    a => a.status === "idle" && isAgentSuitableForTask(a, task)
+  );
+
+  if (availableAgents.length === 0) {
+    return null;
+  }
+
+  // Sort by performance (success rate and response time)
+  availableAgents.sort((a, b) => {
+    const scoreA = a.performance.successRate / (a.performance.avgResponseTime || 1);
+    const scoreB = b.performance.successRate / (b.performance.avgResponseTime || 1);
+    return scoreB - scoreA;
+  });
+
+  const agent = availableAgents[0];
+  agent.status = "working";
+  agent.currentTask = task.description;
+  task.assignedAgent = agent.id;
+  task.status = "in_progress";
+  task.startTime = new Date();
+
+  return agent;
 }
 
-async function executeAgent(
-  agent: Agent,
-  query: string,
-  context: string[] = []
-): Promise<AgentResult> {
-  await logger.info("multiAgent", `Executing ${agent.name} for: "${query.slice(0, 80)}..."`);
-
-  // Retrieve relevant knowledge
-  const ragChunks = await queryVectorStore(query, 5);
-  const ragContext = ragChunks
-    .map((c, i) => `[${i + 1}] ${c.content.slice(0, 300)}`)
-    .join("\n\n");
-
-  // Build agent-specific context
-  let fullContext = agent.systemPrompt;
-  
-  if (ragContext) {
-    fullContext += `\n\n=== KNOWLEDGE BASE ===\n${ragContext}`;
-  }
-  
-  if (context.length > 0) {
-    fullContext += `\n\n=== PREVIOUS RESULTS ===\n${context.join("\n\n")}`;
-  }
-
-  const messages: OllamaMessage[] = [
-    { role: "system", content: fullContext },
-    { role: "user", content: query },
-  ];
-
-  const response = await ollamaChat(messages);
-
-  // Extract confidence if present
-  const confidenceMatch = response.match(/confidence[:\s]*([0-9.]+)/i);
-  const confidence = confidenceMatch 
-    ? parseFloat(confidenceMatch[1])
-    : 0.8;
-
-  return {
-    agent: agent.role,
-    content: response,
-    confidence,
-    sources: ragChunks.map(c => c.metadata.sourceTitle || c.metadata.sourceUrl),
+function isAgentSuitableForTask(agent: Agent, task: Task): boolean {
+  const roleTaskMap: Record<string, AgentRole[]> = {
+    research: ["researcher"],
+    analyze: ["analyst", "researcher"],
+    code: ["coder"],
+    plan: ["planner", "analyst"],
+    execute: ["executor", "coder"],
+    remember: ["memory_keeper"],
+    qa: ["qa_specialist", "analyst"],
   };
+
+  return roleTaskMap[task.type]?.includes(agent.role) || false;
 }
 
-// ── Multi-Agent Orchestration ──────────────────────────────────────────────────
-export async function orchestrateQuery(
-  query: string,
-  conversationHistory: OllamaMessage[] = []
-): Promise<{ response: string; agents: string[]; confidence: number }> {
-  await logger.info("multiAgent", `Orchestrating query: "${query.slice(0, 80)}..."`);
+// ── Execute Task ────────────────────────────────────────────────────────────
+async function executeTask(task: Task, agent: Agent): Promise<any> {
+  await logger.info("agentSwarm", `${agent.name} executing: ${task.description}`);
 
-  // Determine if task is complex
-  const isComplex = query.split(" ").length > 20 || 
-                    query.includes("and") || 
-                    query.includes("also") ||
-                    query.includes("then");
+  const startTime = Date.now();
 
-  if (isComplex) {
-    return await handleComplexQuery(query, conversationHistory);
-  } else {
-    return await handleSimpleQuery(query, conversationHistory);
+  try {
+    let result: any;
+
+    switch (task.type) {
+      case "research":
+        result = await executeResearchTask(task, agent);
+        break;
+      case "analyze":
+        result = await executeAnalysisTask(task, agent);
+        break;
+      case "code":
+        result = await executeCodingTask(task, agent);
+        break;
+      case "plan":
+        result = await executePlanningTask(task, agent);
+        break;
+      case "execute":
+        result = await executeExecutionTask(task, agent);
+        break;
+      case "remember":
+        result = await executeMemoryTask(task, agent);
+        break;
+      case "qa":
+        result = await executeQATask(task, agent);
+        break;
+      default:
+        result = "Task type not implemented";
+    }
+
+    // Update performance metrics
+    const duration = Date.now() - startTime;
+    agent.performance.tasksCompleted++;
+    agent.performance.avgResponseTime = 
+      (agent.performance.avgResponseTime * (agent.performance.tasksCompleted - 1) + duration) /
+      agent.performance.tasksCompleted;
+
+    task.status = "complete";
+    task.result = result;
+    task.endTime = new Date();
+    agent.status = "idle";
+    agent.currentTask = null;
+
+    await logger.info("agentSwarm", `${agent.name} completed task in ${duration}ms`);
+
+    return result;
+
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    
+    // Update failure rate
+    const totalTasks = agent.performance.tasksCompleted + 1;
+    agent.performance.successRate = 
+      (agent.performance.successRate * agent.performance.tasksCompleted) / totalTasks;
+    agent.performance.tasksCompleted++;
+
+    task.status = "failed";
+    task.result = { error: String(err) };
+    task.endTime = new Date();
+    agent.status = "idle";
+    agent.currentTask = null;
+
+    await logger.error("agentSwarm", `${agent.name} failed task: ${err}`);
+
+    throw err;
   }
 }
 
-async function handleSimpleQuery(
-  query: string,
-  conversationHistory: OllamaMessage[]
-): Promise<{ response: string; agents: string[]; confidence: number }> {
-  const agent = await selectAgent(query);
-  const result = await executeAgent(agent, query);
+// ── Task Execution Handlers ─────────────────────────────────────────────────
+async function executeResearchTask(task: Task, agent: Agent): Promise<any> {
+  // Search the web
+  const searchResults = await searchWeb(task.description, 5);
+  
+  // Summarize findings
+  const summary = await ollamaChat(
+    [
+      {
+        role: "user",
+        content: `Summarize these search results:
 
-  return {
-    response: result.content,
-    agents: [agent.role],
-    confidence: result.confidence,
-  };
+${searchResults.map(r => `${r.title}: ${r.snippet}`).join("\n\n")}
+
+Provide a concise summary with key findings.`,
+      },
+    ],
+    agent.model
+  );
+
+  return { searchResults, summary };
 }
 
-async function handleComplexQuery(
+async function executeAnalysisTask(task: Task, agent: Agent): Promise<any> {
+  // Get relevant context
+  const memory = await getMemoryContext(task.description);
+  
+  // Analyze
+  const analysis = await ollamaChat(
+    [
+      {
+        role: "system",
+        content: `You are ${agent.name}, specializing in ${agent.specialization}.`,
+      },
+      {
+        role: "user",
+        content: `${memory}\n\nAnalyze: ${task.description}`,
+      },
+    ],
+    agent.model
+  );
+
+  return analysis;
+}
+
+async function executeCodingTask(task: Task, agent: Agent): Promise<any> {
+  // Extract language from task
+  const languageMatch = task.description.match(/\b(swift|python|javascript|typescript)\b/i);
+  const language = (languageMatch?.[1]?.toLowerCase() || "swift") as any;
+
+  const code = await generateCode(task.description, language, false);
+  
+  return code;
+}
+
+async function executePlanningTask(task: Task, agent: Agent): Promise<any> {
+  const plan = await ollamaChat(
+    [
+      {
+        role: "system",
+        content: `You are ${agent.name}, an expert in ${agent.specialization}.`,
+      },
+      {
+        role: "user",
+        content: `Create a detailed plan for: ${task.description}
+
+Include:
+- Steps to complete
+- Resources needed
+- Estimated timeline
+- Potential challenges
+
+Format as structured plan.`,
+      },
+    ],
+    agent.model
+  );
+
+  return plan;
+}
+
+async function executeExecutionTask(task: Task, agent: Agent): Promise<any> {
+  // Extract code from task if present
+  const codeMatch = task.description.match(/```(?:\w+)?\n([\s\S]*?)```/);
+  
+  if (codeMatch) {
+    const code = codeMatch[1];
+    const result = await executeCode(code);
+    return result;
+  }
+
+  return "No executable code found";
+}
+
+async function executeMemoryTask(task: Task, agent: Agent): Promise<any> {
+  const facts = await recallRelevantFacts(task.description, 10);
+  return facts;
+}
+
+async function executeQATask(task: Task, agent: Agent): Promise<any> {
+  // Validate previous task results
+  const validation = await ollamaChat(
+    [
+      {
+        role: "system",
+        content: "You are a quality assurance specialist. Verify accuracy and completeness.",
+      },
+      {
+        role: "user",
+        content: `Validate this result:
+
+Task: ${task.description}
+
+Return JSON:
+{
+  "valid": true/false,
+  "issues": ["issue 1", ...],
+  "suggestions": ["suggestion 1", ...],
+  "confidence": 0.0-1.0
+}`,
+      },
+    ],
+    agent.model
+  );
+
+  const jsonMatch = validation.match(/\{[\s\S]*\}/);
+  return jsonMatch ? JSON.parse(jsonMatch[0]) : { valid: true, issues: [], suggestions: [], confidence: 0.5 };
+}
+
+// ── Orchestrate Multi-Agent Swarm ───────────────────────────────────────────
+export async function swarmProcess(
   query: string,
-  conversationHistory: OllamaMessage[]
-): Promise<{ response: string; agents: string[]; confidence: number }> {
-  // Decompose into subtasks
-  const subtasks = await decomposeComplexTask(query);
-  
-  // Execute subtasks in order (respecting dependencies)
-  const results: AgentResult[] = [];
-  const completedTasks = new Set<number>();
-  
-  while (completedTasks.size < subtasks.length) {
-    for (let i = 0; i < subtasks.length; i++) {
-      if (completedTasks.has(i)) continue;
-      
-      const subtask = subtasks[i];
-      
-      // Check if dependencies are met
-      const dependenciesMet = subtask.dependencies.every(dep => 
-        completedTasks.has(dep)
-      );
-      
-      if (!dependenciesMet) continue;
-      
-      // Execute subtask
-      const agent = AGENTS[subtask.agent] || AGENTS.general;
-      const previousResults = results.map(r => 
-        `[${r.agent}] ${r.content.slice(0, 500)}`
-      );
-      
-      const result = await executeAgent(agent, subtask.description, previousResults);
-      results.push(result);
-      completedTasks.add(i);
+  onProgress?: (update: { agent: string; status: string; result?: any }) => void
+): Promise<any> {
+  await logger.info("agentSwarm", `Starting swarm process for: ${query}`);
+
+  // 1. Decompose query into tasks
+  const tasks = await decomposeQuery(query);
+  taskQueue.push(...tasks);
+
+  await logger.info("agentSwarm", `Decomposed into ${tasks.length} tasks`);
+
+  // 2. Execute tasks in parallel
+  const taskPromises: Promise<any>[] = [];
+
+  for (const task of tasks) {
+    const agent = assignTask(task);
+    
+    if (agent) {
+      const promise = executeTask(task, agent).then(result => {
+        onProgress?.({ agent: agent.name, status: "complete", result });
+        return { task, agent, result };
+      }).catch(err => {
+        onProgress?.({ agent: agent.name, status: "error", result: String(err) });
+        return { task, agent, error: err };
+      });
+
+      taskPromises.push(promise);
+    } else {
+      await logger.warn("agentSwarm", `No available agent for task: ${task.description}`);
     }
   }
-  
-  // Synthesize results
-  const synthesis = await synthesizeResults(query, results);
-  
-  return {
-    response: synthesis.content,
-    agents: results.map(r => r.agent),
-    confidence: results.reduce((sum, r) => sum + r.confidence, 0) / results.length,
-  };
-}
 
-async function synthesizeResults(
-  originalQuery: string,
-  results: AgentResult[]
-): Promise<AgentResult> {
-  const prompt = `Synthesize these agent results into a cohesive answer:
+  // 3. Wait for all tasks
+  const results = await Promise.all(taskPromises);
 
-Original query: "${originalQuery}"
+  // 4. Synthesize final answer
+  const successfulResults = results.filter(r => !r.error);
+  
+  const synthesis = await ollamaChat(
+    [
+      {
+        role: "system",
+        content: "You are synthesizing results from multiple specialized agents.",
+      },
+      {
+        role: "user",
+        content: `Original query: ${query}
 
 Agent results:
-${results.map(r => `[${r.agent}]: ${r.content}`).join("\n\n")}
+${successfulResults.map(r => `${r.agent.name}: ${JSON.stringify(r.result)}`).join("\n\n")}
 
-Provide a unified, comprehensive answer that integrates all agent insights.`;
+Provide a comprehensive, coherent answer to the original query.`,
+      },
+    ],
+    "llama3.1:70b" // Use best model for synthesis
+  );
 
-  const response = await ollamaChat([{ role: "user", content: prompt }]);
+  await logger.info("agentSwarm", "Swarm process complete");
 
   return {
-    agent: "orchestrator",
-    content: response,
-    confidence: 0.85,
+    query,
+    taskCount: tasks.length,
+    agentsUsed: successfulResults.length,
+    synthesis,
+    individualResults: results,
   };
 }
 
-// ── Streaming Multi-Agent Response ────────────────────────────────────────────
-export async function* orchestrateQueryStream(
-  query: string,
-  conversationHistory: OllamaMessage[] = []
-): AsyncGenerator<{ type: "agent" | "chunk"; data: string }> {
-  const agent = await selectAgent(query);
-  
-  yield { type: "agent", data: agent.role };
-  
-  // Retrieve RAG context
-  const ragChunks = await queryVectorStore(query, 5);
-  const ragContext = ragChunks
-    .map((c, i) => `[${i + 1}] ${c.content.slice(0, 300)}`)
-    .join("\n\n");
-  
-  let fullContext = agent.systemPrompt;
-  if (ragContext) {
-    fullContext += `\n\n=== KNOWLEDGE BASE ===\n${ragContext}`;
-  }
-  
-  const messages: OllamaMessage[] = [
-    { role: "system", content: fullContext },
-    ...conversationHistory.slice(-10),
-    { role: "user", content: query },
-  ];
-  
-  // Stream response
-  for await (const chunk of ollamaChatStream(messages)) {
-    yield { type: "chunk", data: chunk };
-  }
-}
-
-// ── Agent Performance Monitoring ───────────────────────────────────────────────
-interface AgentMetrics {
-  agent: string;
-  totalCalls: number;
-  avgConfidence: number;
-  avgResponseTime: number;
-  errorRate: number;
-}
-
-const agentMetrics = new Map<string, {
-  calls: number;
-  confidenceSum: number;
-  timeSum: number;
-  errors: number;
-}>();
-
-function trackAgentPerformance(
-  agent: string,
-  confidence: number,
-  timeMs: number,
-  error: boolean = false
-): void {
-  const current = agentMetrics.get(agent) || {
-    calls: 0,
-    confidenceSum: 0,
-    timeSum: 0,
-    errors: 0,
+// ── Get Agent Status ────────────────────────────────────────────────────────
+export function getAgentStatus(): {
+  total: number;
+  idle: number;
+  working: number;
+  byRole: Record<AgentRole, number>;
+  topPerformers: Agent[];
+} {
+  const byRole: Record<AgentRole, number> = {
+    researcher: 0,
+    analyst: 0,
+    coder: 0,
+    planner: 0,
+    executor: 0,
+    memory_keeper: 0,
+    qa_specialist: 0,
   };
-  
-  current.calls++;
-  current.confidenceSum += confidence;
-  current.timeSum += timeMs;
-  if (error) current.errors++;
-  
-  agentMetrics.set(agent, current);
-}
 
-export function getAgentMetrics(): AgentMetrics[] {
-  return Array.from(agentMetrics.entries()).map(([agent, data]) => ({
-    agent,
-    totalCalls: data.calls,
-    avgConfidence: data.confidenceSum / data.calls,
-    avgResponseTime: data.timeSum / data.calls,
-    errorRate: data.errors / data.calls,
-  }));
-}
+  let idle = 0;
+  let working = 0;
 
-// ── Self-Optimization ──────────────────────────────────────────────────────────
-export async function optimizeAgentSelection(): Promise<void> {
-  const metrics = getAgentMetrics();
-  
-  // Adjust agent priorities based on performance
-  for (const metric of metrics) {
-    const agent = AGENTS[metric.agent];
-    if (!agent) continue;
-    
-    // Increase priority for high-performing agents
-    if (metric.avgConfidence > 0.85 && metric.errorRate < 0.1) {
-      agent.priority = Math.min(10, agent.priority + 1);
-    }
-    
-    // Decrease priority for low-performing agents
-    if (metric.avgConfidence < 0.6 || metric.errorRate > 0.3) {
-      agent.priority = Math.max(1, agent.priority - 1);
-    }
+  for (const agent of AGENT_POOL) {
+    byRole[agent.role]++;
+    if (agent.status === "idle") idle++;
+    if (agent.status === "working") working++;
   }
-  
-  await logger.info("multiAgent", "Agent priorities optimized based on performance");
-}
 
-// ── Scheduler for agent optimization ───────────────────────────────────────────
-let optimizationInterval: ReturnType<typeof setInterval> | null = null;
+  const topPerformers = [...AGENT_POOL]
+    .sort((a, b) => {
+      const scoreA = a.performance.successRate * a.performance.tasksCompleted;
+      const scoreB = b.performance.successRate * b.performance.tasksCompleted;
+      return scoreB - scoreA;
+    })
+    .slice(0, 5);
 
-export function startAgentOptimization(intervalMs = 6 * 60 * 60 * 1000): void {
-  if (optimizationInterval) return;
-  
-  logger.info("multiAgent", "Agent optimization scheduler started");
-  optimizationInterval = setInterval(() => optimizeAgentSelection(), intervalMs);
-}
-
-export function stopAgentOptimization(): void {
-  if (optimizationInterval) {
-    clearInterval(optimizationInterval);
-    optimizationInterval = null;
-  }
+  return {
+    total: AGENT_POOL.length,
+    idle,
+    working,
+    byRole,
+    topPerformers,
+  };
 }

@@ -1,0 +1,2 @@
+{"instruction": "Write a SwiftUI button", "output": "Button(\"Click me\") { action() }"}
+{"instruction": "Create a Python function for fibonacci", "output": "def fib(n):\n    ..."}
