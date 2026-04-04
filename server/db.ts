@@ -112,6 +112,18 @@ export async function createConversation(data: any) {
   return { id, userId: data.userId, title: data.title ?? "New Conversation", model: data.model ?? "llama3.2", createdAt: Date.now(), updatedAt: Date.now() };
 }
 
+export async function getMessagesByRole(
+  role: "user" | "assistant" | "system",
+  limit = 100
+) {
+  return db
+    .select()
+    .from(messages)
+    .where(eq(messages.role, role))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
+}
+
 export async function getConversations(userId?: number) {
   if (USE_MYSQL) {
     const { db, schema, orm } = await getMysqlDb();

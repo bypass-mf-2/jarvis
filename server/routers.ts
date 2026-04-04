@@ -23,6 +23,13 @@ import {
   getPatches,
   updatePatchStatus,
 } from "./db";
+import {
+  analyzeWritingStyle,
+  loadVoiceProfile,
+  writeInTrevorsVoice,
+} from "./voiceLearning.js";
+
+import uploadRoutes from "./uploadRoutes.js";
 import { ragChat } from "./rag";
 import { scrapeSource, scrapeAllSources } from "./scraper";
 import { runSelfAnalysis, applyPatch } from "./selfImprovement";
@@ -276,5 +283,40 @@ export const appRouter = router({
   selfImprovement: selfImprovementRouter,
   systemStatus: systemStatusRouter,
 });
+
+app.use("/api", uploadRoutes);
+
+const voiceRouter = router({
+  analyzeStyle: publicProcedure
+    .mutation(async () => {
+      return await analyzeWritingStyle();
+    }),
+  
+  getProfile: publicProcedure
+    .query(() => {
+      return loadVoiceProfile();
+    }),
+  
+  writeInMyVoice: publicProcedure
+    .input(z.object({
+      topic: z.string(),
+      length: z.enum(["short", "medium", "long"]).optional(),
+      type: z.enum(["essay", "story", "analysis", "chapter"]).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return await writeInTrevorsVoice(
+        input.topic,
+        input.length,
+        input.type
+      );
+    }),
+});
+
+// Add to appRouter:
+export const appRouter = router({
+  // ... existing routers
+  voice: voiceRouter,
+});
+
 
 export type AppRouter = typeof appRouter;

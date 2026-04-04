@@ -3,6 +3,7 @@
  * Called once at server startup to kick off all scheduled background tasks.
  */
 
+import { startVoiceLearning } from "./voiceLearning.js";
 import { startScraperScheduler, scrapeAllSources } from "./scraper";
 import { startSelfImprovementScheduler } from "./selfImprovement";
 import { logger } from "./logger";
@@ -186,4 +187,11 @@ export async function initializeServices(): Promise<void> {
   startSelfImprovementScheduler(improvementInterval);
 
   await logger.info("services", "All background services initialized");
+}
+
+export async function startBackgroundServices() {
+  // ... existing services
+  
+  // Start voice learning (updates daily)
+  startVoiceLearning(24 * 60 * 60 * 1000);
 }

@@ -13,8 +13,11 @@ import {
   Brain, Globe, Zap, ChevronLeft, ChevronRight,
   MessageSquare, Database, Rss, Settings, Activity,
   RefreshCw, CheckCircle, XCircle, Clock, AlertTriangle,
-  Bot, User, Loader2, StopCircle
+  Bot, User, Loader2, StopCircle,
+  Upload
 } from "lucide-react";
+import { FileUploadPanel } from "@/components/FileUploadPanel";
+
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Message = {
@@ -159,6 +162,29 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [convData?.messages, streamedResponse]);
 
+  // Add a new side panel option
+type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "upload";
+
+// In your panel rendering section:
+{sidePanel === "upload" && (
+  <FileUploadPanel />
+)}
+
+// Add upload icon to toolbar:
+<Tooltip>
+  <TooltipTrigger asChild>
+    <Button
+      variant="ghost"
+      size="icon"
+      className={`h-8 w-8 ${sidePanel === "upload" ? "text-primary" : ""}`}
+      onClick={() => setSidePanel("upload")}
+    >
+      <Upload className="w-4 h-4" />
+    </Button>
+  </TooltipTrigger>
+  <TooltipContent>Upload Files</TooltipContent>
+</Tooltip>
+
   // ── Send message ─────────────────────────────────────────────────────────────
   useEffect(() => {
     isSendingRef.current = isSending;
@@ -172,6 +198,8 @@ export default function Home() {
       const conv = await createConv.mutateAsync({});
       convId = conv?.id ?? null;
       if (!convId) return;
+      setActiveConvId(convId); // <-- ADD THIS LINE
+      await new Promise(r => setTimeout(r, 100)); // <-- AND THIS
     }
 
     const text = input.trim();
@@ -192,7 +220,7 @@ export default function Home() {
         },
       }
     );
-  }, [input, activeConvId, voiceEnabled]);
+  }, [input, activeConvId, voiceEnabled, refetchMessages]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
