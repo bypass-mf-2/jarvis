@@ -8,8 +8,8 @@ if (!connectionString) {
 export default defineConfig({
   schema: "./drizzle/schema.ts",
   out: "./drizzle",
-  dialect: "mysql",
+  dialect: "sqlite",
   dbCredentials: {
-    url: connectionString,
+    url: "file:./dev.db",
   },
 });

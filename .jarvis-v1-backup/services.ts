@@ -10,13 +10,6 @@ import {
   addScrapeSource,
   getScrapeSources,
 } from "./db";
-import {
-  startAutonomousScheduler,
-  setAutonomyLevel,
-} from "./autonomousImprovement.js";
-import { startSourceDiscoveryScheduler } from "./sourceDiscovery.js";
-import { startAgentOptimization } from "./multiAgent.js";
-
 
 // Default RSS sources to seed on first run (16 high-quality feeds)
 const DEFAULT_SOURCES = [

@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * JARVIS 2.0 Upgrade Script
+ * JARVIS 2.0 Upgrade Script (ES Module Version)
  * 
  * Automatically integrates autonomous improvement features into existing JARVIS installation.
  * 
- * Usage: node upgrade-to-v2.js [--dry-run] [--autonomy-level=1]
+ * Usage: node upgrade-to-v2.mjs [--dry-run] [--autonomy-level=1]
  */
 
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const AUTONOMY_LEVEL = parseInt(
@@ -44,6 +48,28 @@ checkExists(path.join(SERVER_DIR, 'services.ts'));
 checkExists(path.join(SERVER_DIR, 'ollama.ts'));
 checkExists(path.join(SERVER_DIR, 'rag.ts'));
 
+// Check for new modules
+const newModules = [
+  'autonomousImprovement.ts',
+  'sourceDiscovery.ts',
+  'multiAgent.ts'
+];
+
+console.log('\nChecking for new modules...');
+for (const module of newModules) {
+  const modulePath = path.join(SERVER_DIR, module);
+  if (fs.existsSync(modulePath)) {
+    console.log(`✅ Found: ${module}`);
+  } else {
+    console.error(`❌ Missing: ${module}`);
+    console.error(`\nPlease copy the new modules to server/ directory first:`);
+    console.error(`  cp autonomousImprovement.ts server/`);
+    console.error(`  cp sourceDiscovery.ts server/`);
+    console.error(`  cp multiAgent.ts server/`);
+    process.exit(1);
+  }
+}
+
 // Check if Git is initialized
 try {
   execSync('git status', { cwd: PROJECT_ROOT, stdio: 'ignore' });
@@ -52,12 +78,16 @@ try {
   console.log('⚠️  No Git repository found');
   console.log('Initializing Git for rollback capability...');
   if (!DRY_RUN) {
-    execSync('git init', { cwd: PROJECT_ROOT });
-    execSync('git add .', { cwd: PROJECT_ROOT });
-    execSync('git commit -m "Pre-v2.0 baseline"', { cwd: PROJECT_ROOT });
-    execSync('git branch backup-v1', { cwd: PROJECT_ROOT });
+    try {
+      execSync('git init', { cwd: PROJECT_ROOT });
+      execSync('git add .', { cwd: PROJECT_ROOT });
+      execSync('git commit -m "Pre-v2.0 baseline"', { cwd: PROJECT_ROOT });
+      execSync('git branch backup-v1', { cwd: PROJECT_ROOT });
+      console.log('✅ Git initialized');
+    } catch (err) {
+      console.log('⚠️  Git initialization failed, continuing anyway...');
+    }
   }
-  console.log('✅ Git initialized');
 }
 
 // ── Step 2: Create Backup ─────────────────────────────────────────────────────
@@ -68,7 +98,6 @@ if (!DRY_RUN) {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
   }
 
-  // Backup critical files
   const filesToBackup = [
     'server/db.ts',
     'server/routers.ts',
@@ -78,66 +107,25 @@ if (!DRY_RUN) {
   for (const file of filesToBackup) {
     const src = path.join(PROJECT_ROOT, file);
     const dest = path.join(BACKUP_DIR, path.basename(file));
-    fs.copyFileSync(src, dest);
-    console.log(`✅ Backed up: ${file}`);
-  }
-}
-
-// ── Step 3: Install Dependencies ──────────────────────────────────────────────
-console.log('\n📦 Step 3: Checking dependencies...');
-
-const packageJson = JSON.parse(
-  fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf-8')
-);
-
-const requiredDeps = {
-  nanoid: '^4.0.0', // Already should be there
-};
-
-let needsInstall = false;
-for (const [dep, version] of Object.entries(requiredDeps)) {
-  if (!packageJson.dependencies[dep]) {
-    console.log(`⚠️  Missing dependency: ${dep}`);
-    needsInstall = true;
-  } else {
-    console.log(`✅ Found: ${dep}`);
-  }
-}
-
-if (needsInstall && !DRY_RUN) {
-  console.log('Installing missing dependencies...');
-  execSync('pnpm install', { cwd: PROJECT_ROOT, stdio: 'inherit' });
-}
-
-// ── Step 4: Add New Files ─────────────────────────────────────────────────────
-console.log('\n📁 Step 4: Adding new modules...');
-
-const NEW_FILES = [
-  'server/autonomousImprovement.ts',
-  'server/sourceDiscovery.ts',
-  'server/multiAgent.ts',
-];
-
-for (const file of NEW_FILES) {
-  const filepath = path.join(PROJECT_ROOT, file);
-  if (fs.existsSync(filepath)) {
-    console.log(`⚠️  Already exists: ${file}`);
-  } else {
-    console.log(`📝 Would create: ${file}`);
-    if (!DRY_RUN) {
-      // Files already created by Claude, just verify
-      console.log(`✅ Created: ${file}`);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, dest);
+      console.log(`✅ Backed up: ${file}`);
     }
   }
 }
 
-// ── Step 5: Update Database Schema ────────────────────────────────────────────
-console.log('\n🗄️  Step 5: Updating database schema...');
+// ── Step 3: Update Database Schema ────────────────────────────────────────────
+console.log('\n🗄️  Step 3: Updating database schema...');
 
 const schemaPath = path.join(PROJECT_ROOT, 'drizzle', 'schema.ts');
-let schemaContent = fs.readFileSync(schemaPath, 'utf-8');
 
-const newTables = `
+if (!fs.existsSync(schemaPath)) {
+  console.error('❌ Could not find drizzle/schema.ts');
+  console.log('⚠️  Skipping database schema update - you may need to do this manually');
+} else {
+  let schemaContent = fs.readFileSync(schemaPath, 'utf-8');
+
+  const newTables = `
 // ─── v2.0 Autonomous Features ───────────────────────────────────────────────────
 export const autonomyConfig = mysqlTable("autonomy_config", {
   id: serial("id").primaryKey(),
@@ -167,24 +155,20 @@ export const agentMetrics = mysqlTable("agent_metrics", {
 });
 `;
 
-if (!schemaContent.includes('autonomyConfig')) {
-  console.log('📝 Adding new tables to schema...');
-  if (!DRY_RUN) {
-    // Add before the last closing brace/bracket
-    const insertPos = schemaContent.lastIndexOf('}');
-    schemaContent = 
-      schemaContent.slice(0, insertPos) + 
-      newTables + 
-      schemaContent.slice(insertPos);
-    fs.writeFileSync(schemaPath, schemaContent);
+  if (!schemaContent.includes('autonomyConfig')) {
+    console.log('📝 Adding new tables to schema...');
+    if (!DRY_RUN) {
+      schemaContent += '\n' + newTables;
+      fs.writeFileSync(schemaPath, schemaContent);
+    }
+    console.log('✅ Schema updated');
+  } else {
+    console.log('✅ Schema already has v2.0 tables');
   }
-  console.log('✅ Schema updated');
-} else {
-  console.log('✅ Schema already has v2.0 tables');
 }
 
-// ── Step 6: Update Database Functions ─────────────────────────────────────────
-console.log('\n🔧 Step 6: Updating database functions...');
+// ── Step 4: Update Database Functions ─────────────────────────────────────────
+console.log('\n🔧 Step 4: Updating database functions...');
 
 const dbPath = path.join(SERVER_DIR, 'db.ts');
 let dbContent = fs.readFileSync(dbPath, 'utf-8');
@@ -237,7 +221,7 @@ export async function trackAgentCall(agentName: string, data: {
     const newAvgConfidence = 
       (currentConf * existing.totalCalls + data.confidence) / newTotalCalls;
     const newAvgResponseTime =
-      (existing.avgResponseTime! * existing.totalCalls + data.responseTime) / newTotalCalls;
+      ((existing.avgResponseTime || 0) * existing.totalCalls + data.responseTime) / newTotalCalls;
     const currentError = parseFloat(existing.errorRate || "0");
     const newErrorRate =
       (currentError * existing.totalCalls + (data.error ? 1 : 0)) / newTotalCalls;
@@ -267,7 +251,6 @@ export async function getAllAgentMetrics() {
 if (!dbContent.includes('getAutonomyConfig')) {
   console.log('📝 Adding v2.0 database functions...');
   if (!DRY_RUN) {
-    // Add at the end
     dbContent += '\n' + newDbFunctions;
     fs.writeFileSync(dbPath, dbContent);
   }
@@ -276,19 +259,18 @@ if (!dbContent.includes('getAutonomyConfig')) {
   console.log('✅ Database functions already present');
 }
 
-// ── Step 7: Update Services ───────────────────────────────────────────────────
-console.log('\n⚙️  Step 7: Updating service startup...');
+// ── Step 5: Update Services ───────────────────────────────────────────────────
+console.log('\n⚙️  Step 5: Updating service startup...');
 
 const servicesPath = path.join(SERVER_DIR, 'services.ts');
 let servicesContent = fs.readFileSync(servicesPath, 'utf-8');
 
-const newImports = `
-import {
+const newImports = `import {
   startAutonomousScheduler,
   setAutonomyLevel,
-} from "./autonomousImprovement";
-import { startSourceDiscoveryScheduler } from "./sourceDiscovery";
-import { startAgentOptimization } from "./multiAgent";
+} from "./autonomousImprovement.js";
+import { startSourceDiscoveryScheduler } from "./sourceDiscovery.js";
+import { startAgentOptimization } from "./multiAgent.js";
 `;
 
 const newServiceStarts = `
@@ -306,22 +288,26 @@ const newServiceStarts = `
 if (!servicesContent.includes('startAutonomousScheduler')) {
   console.log('📝 Updating services startup...');
   if (!DRY_RUN) {
-    // Add imports at top
-    const importInsertPos = servicesContent.indexOf('import');
+    // Add imports at top (after existing imports)
+    const lastImportIndex = servicesContent.lastIndexOf('import');
+    const importEndIndex = servicesContent.indexOf(';', lastImportIndex) + 1;
     servicesContent = 
-      servicesContent.slice(0, importInsertPos) +
-      newImports +
-      servicesContent.slice(importInsertPos);
+      servicesContent.slice(0, importEndIndex) +
+      '\n' + newImports +
+      servicesContent.slice(importEndIndex);
     
-    // Add service starts
-    // Find the function that starts services
+    // Add service starts at the end of the start function
     const funcMatch = servicesContent.match(/export (async )?function start\w*Services/);
     if (funcMatch) {
-      const funcEnd = servicesContent.indexOf('}', funcMatch.index!);
+      const funcStart = funcMatch.index;
+      const funcBody = servicesContent.slice(funcStart);
+      const lastCloseBrace = funcBody.lastIndexOf('}');
+      const insertPoint = funcStart + lastCloseBrace;
+      
       servicesContent = 
-        servicesContent.slice(0, funcEnd) +
+        servicesContent.slice(0, insertPoint) +
         newServiceStarts +
-        servicesContent.slice(funcEnd);
+        servicesContent.slice(insertPoint);
     }
     
     fs.writeFileSync(servicesPath, servicesContent);
@@ -331,34 +317,8 @@ if (!servicesContent.includes('startAutonomousScheduler')) {
   console.log('✅ Services already configured');
 }
 
-// ── Step 8: Run Database Migration ────────────────────────────────────────────
-console.log('\n🔄 Step 8: Running database migration...');
-
-if (!DRY_RUN) {
-  try {
-    console.log('Generating migration...');
-    execSync('pnpm drizzle-kit generate:mysql', { 
-      cwd: PROJECT_ROOT, 
-      stdio: 'inherit' 
-    });
-    
-    console.log('Running migration...');
-    execSync('pnpm drizzle-kit migrate', { 
-      cwd: PROJECT_ROOT, 
-      stdio: 'inherit' 
-    });
-    
-    console.log('✅ Migration complete');
-  } catch (err) {
-    console.error('⚠️  Migration failed:', err.message);
-    console.log('You may need to run migrations manually');
-  }
-} else {
-  console.log('📝 Would run: pnpm drizzle-kit generate:mysql && pnpm drizzle-kit migrate');
-}
-
-// ── Step 9: Update Environment Variables ──────────────────────────────────────
-console.log('\n🌍 Step 9: Updating environment variables...');
+// ── Step 6: Update Environment Variables ──────────────────────────────────────
+console.log('\n🌍 Step 6: Updating environment variables...');
 
 const envPath = path.join(PROJECT_ROOT, 'jarvis.env');
 if (fs.existsSync(envPath)) {
@@ -389,24 +349,47 @@ AGENT_OPTIMIZATION_HOURS=6
   } else {
     console.log('✅ Environment already configured');
   }
+} else {
+  console.log('⚠️  No jarvis.env file found, skipping environment setup');
 }
 
-// ── Step 10: Summary ──────────────────────────────────────────────────────────
+// ── Step 7: Run Database Migration ────────────────────────────────────────────
+console.log('\n🔄 Step 7: Database migration instructions...');
+
+console.log(`
+To apply the database schema changes, run:
+
+  pnpm drizzle-kit generate
+  pnpm drizzle-kit migrate
+
+Or if using SQLite:
+
+  pnpm drizzle-kit generate:sqlite
+  pnpm drizzle-kit push:sqlite
+`);
+
+if (!DRY_RUN) {
+  console.log('⚠️  Automatic migration skipped - please run manually to review changes');
+}
+
+// ── Step 8: Summary ──────────────────────────────────────────────────────────
 console.log('\n' + '━'.repeat(60));
 console.log('🎉 JARVIS 2.0 Upgrade Complete!');
 console.log('━'.repeat(60));
 
 console.log('\nWhat was done:');
+console.log('✅ Verified new modules are in place');
 console.log('✅ Created backup in .jarvis-v1-backup/');
-console.log('✅ Added 3 new modules (autonomous, discovery, multi-agent)');
-console.log('✅ Updated database schema with 3 new tables');
+console.log('✅ Updated database schema');
 console.log('✅ Added database helper functions');
 console.log('✅ Updated service startup sequence');
-console.log('✅ Ran database migrations');
 console.log(`✅ Set autonomy level to ${AUTONOMY_LEVEL}`);
 
 console.log('\nNext steps:');
-console.log('1. Review the changes: git diff');
+console.log('1. Run database migration:');
+console.log('   pnpm drizzle-kit generate');
+console.log('   pnpm drizzle-kit migrate');
+console.log('');
 console.log('2. Start JARVIS: pnpm dev');
 console.log('3. Monitor logs for autonomous activity');
 console.log('4. Read ARCHITECTURE_V2.md for details');

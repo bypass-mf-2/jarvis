@@ -119,3 +119,32 @@ export const selfImprovementPatches = mysqlTable("self_improvement_patches", {
 
 export type SelfImprovementPatch = typeof selfImprovementPatches.$inferSelect;
 export type InsertSelfImprovementPatch = typeof selfImprovementPatches.$inferInsert;
+
+
+// ─── v2.0 Autonomous Features ───────────────────────────────────────────────────
+export const autonomyConfig = mysqlTable("autonomy_config", {
+  id: serial("id").primaryKey(),
+  autonomyLevel: int("autonomy_level").notNull().default(1),
+  maxPatchesPerHour: int("max_patches_per_hour").notNull().default(3),
+  enabledCategories: json("enabled_categories").notNull().default("[]"),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
+});
+
+export const sourceMetrics = mysqlTable("source_metrics", {
+  id: serial("id").primaryKey(),
+  sourceId: int("source_id").notNull(),
+  qualityScore: decimal("quality_score", { precision: 3, scale: 2 }),
+  avgChunkLength: int("avg_chunk_length"),
+  errorRate: decimal("error_rate", { precision: 3, scale: 2 }),
+  lastEvaluated: timestamp("last_evaluated").defaultNow(),
+});
+
+export const agentMetrics = mysqlTable("agent_metrics", {
+  id: serial("id").primaryKey(),
+  agentName: varchar("agent_name", { length: 50 }).notNull().unique(),
+  totalCalls: int("total_calls").notNull().default(0),
+  avgConfidence: decimal("avg_confidence", { precision: 3, scale: 2 }),
+  avgResponseTime: int("avg_response_time"),
+  errorRate: decimal("error_rate", { precision: 3, scale: 2 }),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
+});
