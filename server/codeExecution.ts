@@ -12,7 +12,7 @@
  * - Validating solutions
  */
 
-import { VM } from "vm2";
+import * as vm from "vm";
 import { exec } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs";
@@ -36,17 +36,15 @@ export async function executeJavaScript(
   const startTime = Date.now();
 
   try {
-    const vm = new VM({
-      timeout,
-      sandbox: {
-        console: {
-          log: (...args: any[]) => console.log("[SANDBOX]", ...args),
-          error: (...args: any[]) => console.error("[SANDBOX]", ...args),
-        },
+    const sandbox = {
+      console: {
+        log: (...args: any[]) => console.log("[SANDBOX]", ...args),
+        error: (...args: any[]) => console.error("[SANDBOX]", ...args),
       },
-    });
-
-    const result = vm.run(code);
+      result: undefined as any,
+    };
+    const context = vm.createContext(sandbox);
+    const result = vm.runInContext(code, context, { timeout });
     const executionTime = Date.now() - startTime;
 
     return {
@@ -303,15 +301,16 @@ export async function validateCode(
   try {
     switch (language) {
       case "javascript":
-        // Basic syntax check using VM2
-        new VM().run(code);
+        // Basic syntax check using vm
+        vm.runInNewContext(code, {}, { timeout: 5000 });
         break;
 
       case "python":
         // Run with syntax check flag
-        const { stderr } = await execAsync(`python3 -m py_compile -`, {
-          input: code,
-        });
+        const tempPy = path.join(SANDBOX_DIR, `check_${Date.now()}.py`);
+        fs.writeFileSync(tempPy, code);
+        const { stderr } = await execAsync(`python3 -m py_compile "${tempPy}"`);
+        if (fs.existsSync(tempPy)) fs.unlinkSync(tempPy);
         if (stderr) errors.push(stderr);
         break;
 

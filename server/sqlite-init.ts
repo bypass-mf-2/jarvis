@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   audioUrl TEXT,
   tokensUsed INTEGER,
   ragChunksUsed TEXT,
+  userRating INTEGER,
   createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
 );
 
@@ -101,6 +102,149 @@ CREATE TABLE IF NOT EXISTS self_improvement_patches (
   status TEXT DEFAULT 'pending',
   appliedAt INTEGER,
   createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Autonomy config table
+CREATE TABLE IF NOT EXISTS autonomy_config (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  autonomy_level INTEGER NOT NULL DEFAULT 1,
+  max_patches_per_hour INTEGER NOT NULL DEFAULT 3,
+  enabled_categories TEXT NOT NULL DEFAULT '[]',
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Agent metrics table
+CREATE TABLE IF NOT EXISTS agent_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name TEXT NOT NULL UNIQUE,
+  total_calls INTEGER NOT NULL DEFAULT 0,
+  avg_confidence TEXT,
+  avg_response_time INTEGER,
+  error_rate TEXT,
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Learned facts table
+CREATE TABLE IF NOT EXISTS learned_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT NOT NULL,
+  fact TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  sourceConversationId INTEGER,
+  verified INTEGER DEFAULT 0,
+  timesReferenced INTEGER DEFAULT 0,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Entity memory table
+CREATE TABLE IF NOT EXISTS entity_memory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  description TEXT,
+  attributes TEXT,
+  relationships TEXT,
+  firstMentioned INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+  lastMentioned INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+  mentionCount INTEGER DEFAULT 1,
+  importance TEXT DEFAULT '0.50',
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Conversation context table
+CREATE TABLE IF NOT EXISTS conversation_context (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversationId INTEGER NOT NULL,
+  topicSummary TEXT,
+  extractedFacts TEXT,
+  entities TEXT,
+  sentiment TEXT,
+  keyTopics TEXT,
+  followUpNeeded INTEGER DEFAULT 0,
+  followUpTopic TEXT,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- File uploads table
+CREATE TABLE IF NOT EXISTS file_uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  filename TEXT NOT NULL,
+  originalPath TEXT NOT NULL,
+  fileType TEXT NOT NULL,
+  fileSize INTEGER NOT NULL,
+  processed INTEGER DEFAULT 0,
+  processingStatus TEXT DEFAULT 'pending',
+  chunksExtracted INTEGER DEFAULT 0,
+  metadata TEXT,
+  uploadedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  processedAt INTEGER
+);
+
+-- LLM settings table
+CREATE TABLE IF NOT EXISTS llm_settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  userId INTEGER,
+  settingName TEXT NOT NULL,
+  settingValue TEXT NOT NULL,
+  settingType TEXT NOT NULL,
+  description TEXT,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Learning sessions table
+CREATE TABLE IF NOT EXISTS learning_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sessionType TEXT NOT NULL,
+  itemsProcessed INTEGER DEFAULT 0,
+  factsLearned INTEGER DEFAULT 0,
+  entitiesDiscovered INTEGER DEFAULT 0,
+  duration INTEGER,
+  status TEXT DEFAULT 'success',
+  notes TEXT,
+  startedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  completedAt INTEGER
+);
+
+-- Training examples table
+CREATE TABLE IF NOT EXISTS training_examples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversationId INTEGER,
+  instruction TEXT NOT NULL,
+  output TEXT NOT NULL,
+  rating INTEGER NOT NULL,
+  category TEXT DEFAULT 'general',
+  usedInTraining INTEGER DEFAULT 0,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+-- Model versions table
+CREATE TABLE IF NOT EXISTS model_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  modelName TEXT NOT NULL,
+  baseModel TEXT NOT NULL,
+  specialty TEXT DEFAULT 'general',
+  trainingExamples INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'training',
+  performanceScore TEXT,
+  abTestWins INTEGER DEFAULT 0,
+  abTestLosses INTEGER DEFAULT 0,
+  notes TEXT,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  deployedAt INTEGER
+);
+
+-- Source metrics table
+CREATE TABLE IF NOT EXISTS source_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL,
+  quality_score TEXT,
+  avg_chunk_length INTEGER,
+  error_rate TEXT,
+  last_evaluated INTEGER DEFAULT (strftime('%s', 'now') * 1000)
 );
 
 -- Create indexes for common queries

@@ -205,7 +205,7 @@ async function evaluateSourceQuality(sourceId: number): Promise<SourceQualityMet
 // ── Source Pruning ─────────────────────────────────────────────────────────────
 async function pruneLowQualitySources(): Promise<{ pruned: number; kept: number }> {
   const sources = await getScrapeSources();
-  const active = sources.filter((s: any) => s.isActive);
+  const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
 
   let pruned = 0;
   let kept = 0;
@@ -252,9 +252,9 @@ async function recommendSourceAdjustments(): Promise<{
   const activeSources = currentSources.filter((s: any) => s.isActive);
 
   // Find gaps in coverage
-  const coveredTopics = new Set(activeSources.map((s: any) => s.type));
+  const coveredTopics = new Set<string>(activeSources.map((s: any) => s.type));
   const uncoveredInterests = interests.filter(
-    (i) => !Array.from(coveredTopics).some(topic => 
+    (i) => !Array.from(coveredTopics).some((topic: string) =>
       topic.toLowerCase().includes(i.topic.toLowerCase())
     )
   );
@@ -302,7 +302,7 @@ async function deduplicateKnowledge(): Promise<{ removed: number }> {
   let removed = 0;
   
   // Remove duplicates (keep the oldest/first one)
-  for (const [hash, ids] of contentHashes.entries()) {
+  for (const [hash, ids] of Array.from(contentHashes.entries())) {
     if (ids.length > 1) {
       // Would need a deleteKnowledgeChunk function in db.ts
       await logger.info("sourceDiscovery", `Found ${ids.length} duplicate chunks: ${hash}`);

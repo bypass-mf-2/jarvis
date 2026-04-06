@@ -35,6 +35,7 @@ async function buildAugmentedMessages(
 
   // Optionally: Web search for current info
   let webContext = "";
+  const useWebSearch = process.env.ENABLE_WEB_SEARCH === "true";
   if (useWebSearch) {
     const searchResults = await searchWeb(userMessage, 3);
     webContext = `\n\n=== WEB SEARCH RESULTS ===\n` +
@@ -77,7 +78,7 @@ async function buildAugmentedMessages(
 export async function ragChat(
   userMessage: string,
   conversationHistory: OllamaMessage[],
-  model?: string
+  modelOverride?: string
 ): Promise<{ response: string; ragChunks: VectorSearchResult[] }> {
   await logger.info("rag", `Processing query: "${userMessage.slice(0, 80)}..."`);
 
@@ -85,11 +86,12 @@ export async function ragChat(
     userMessage,
     conversationHistory
   );
-  //Sm
-  // art model selection (unless overridden)
+  // Smart model selection (unless overridden)
   const model = modelOverride || await smartRouteModel(userMessage);
 
-  await logger.info("rag", `Response generated, used ${ragChunks.length} RAG chunks`);
+  logger.info("rag", `Using model: ${model} for query: ${userMessage.slice(0, 50)}...`);
+  // Get response
+  const response = await ollamaChat(messages, model);
 
   return { response, ragChunks };
 }

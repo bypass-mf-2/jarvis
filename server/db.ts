@@ -116,12 +116,16 @@ export async function getMessagesByRole(
   role: "user" | "assistant" | "system",
   limit = 100
 ) {
-  return db
-    .select()
-    .from(messages)
-    .where(eq(messages.role, role))
-    .orderBy(desc(messages.createdAt))
-    .limit(limit);
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db
+      .select()
+      .from(schema.messages)
+      .where(orm.eq(schema.messages.role, role))
+      .orderBy(orm.desc(schema.messages.createdAt))
+      .limit(limit);
+  }
+  return sqliteRun("SELECT * FROM messages WHERE role = ? ORDER BY createdAt DESC LIMIT ?", [role, limit]);
 }
 
 export async function getConversations(userId?: number) {
@@ -363,6 +367,23 @@ export async function updatePatchStatus(id: number, status: string) {
   }
 }
 
+// ── Direct Drizzle DB access (for modules that need it) ─────────────────────
+export { getMysqlDb as getMysqlDbInternal };
+
+export async function getDrizzleDb() {
+  const { db } = await getMysqlDb();
+  return db;
+}
+
+// Re-export as `db` for convenience (lazy-initialized proxy)
+export const db = new Proxy({} as any, {
+  get(_target, prop) {
+    return (...args: any[]) => {
+      return getMysqlDb().then(({ db: drizzleDb }) => (drizzleDb as any)[prop](...args));
+    };
+  },
+});
+
 // ── Compatibility shim for vectorStore.ts keyword fallback ───────────────────
 export async function getDb() {
   if (USE_MYSQL) {
@@ -375,12 +396,22 @@ export async function getDb() {
 
 // ─── v2.0 Database Functions ────────────────────────────────────────────────────
 export async function getAutonomyConfig() {
-  const [config] = await db.select().from(autonomyConfig).limit(1);
-  return config || { 
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const rows = await db.select().from(schema.autonomyConfig).limit(1);
+    return rows[0] || {
+      id: 0,
+      autonomyLevel: 1,
+      maxPatchesPerHour: 3,
+      enabledCategories: []
+    };
+  }
+  const rows = sqliteRun("SELECT * FROM autonomy_config LIMIT 1");
+  return rows[0] || {
     id: 0,
-    autonomyLevel: 1, 
+    autonomyLevel: 1,
     maxPatchesPerHour: 3,
-    enabledCategories: [] 
+    enabledCategories: []
   };
 }
 
@@ -390,16 +421,33 @@ export async function updateAutonomyConfig(data: Partial<{
   enabledCategories: string[];
 }>) {
   const existing = await getAutonomyConfig();
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    if (existing.id) {
+      return db.update(schema.autonomyConfig)
+        .set(data)
+        .where(orm.eq(schema.autonomyConfig.id, existing.id));
+    } else {
+      return db.insert(schema.autonomyConfig).values({
+        autonomyLevel: data.autonomyLevel || 1,
+        maxPatchesPerHour: data.maxPatchesPerHour || 3,
+        enabledCategories: data.enabledCategories || [],
+      });
+    }
+  }
   if (existing.id) {
-    return db.update(autonomyConfig)
-      .set(data)
-      .where(eq(autonomyConfig.id, existing.id));
+    const updates: string[] = [];
+    const values: any[] = [];
+    if (data.autonomyLevel !== undefined) { updates.push("autonomy_level = ?"); values.push(data.autonomyLevel); }
+    if (data.maxPatchesPerHour !== undefined) { updates.push("max_patches_per_hour = ?"); values.push(data.maxPatchesPerHour); }
+    if (data.enabledCategories !== undefined) { updates.push("enabled_categories = ?"); values.push(JSON.stringify(data.enabledCategories)); }
+    values.push(existing.id);
+    if (updates.length > 0) sqliteRun(`UPDATE autonomy_config SET ${updates.join(", ")} WHERE id = ?`, values);
   } else {
-    return db.insert(autonomyConfig).values({
-      autonomyLevel: data.autonomyLevel || 1,
-      maxPatchesPerHour: data.maxPatchesPerHour || 3,
-      enabledCategories: data.enabledCategories || [],
-    });
+    sqliteInsert(
+      "INSERT INTO autonomy_config (autonomy_level, max_patches_per_hour, enabled_categories) VALUES (?, ?, ?)",
+      [data.autonomyLevel || 1, data.maxPatchesPerHour || 3, JSON.stringify(data.enabledCategories || [])]
+    );
   }
 }
 
@@ -408,40 +456,143 @@ export async function trackAgentCall(agentName: string, data: {
   responseTime: number;
   error?: boolean;
 }) {
-  const [existing] = await db
-    .select()
-    .from(agentMetrics)
-    .where(eq(agentMetrics.agentName, agentName))
-    .limit(1);
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const [existing] = await db
+      .select()
+      .from(schema.agentMetrics)
+      .where(orm.eq(schema.agentMetrics.agentName, agentName))
+      .limit(1);
 
-  if (existing) {
-    const newTotalCalls = existing.totalCalls + 1;
-    const currentConf = parseFloat(existing.avgConfidence || "0");
-    const newAvgConfidence = 
-      (currentConf * existing.totalCalls + data.confidence) / newTotalCalls;
-    const newAvgResponseTime =
-      ((existing.avgResponseTime || 0) * existing.totalCalls + data.responseTime) / newTotalCalls;
-    const currentError = parseFloat(existing.errorRate || "0");
-    const newErrorRate =
-      (currentError * existing.totalCalls + (data.error ? 1 : 0)) / newTotalCalls;
+    if (existing) {
+      const newTotalCalls = existing.totalCalls + 1;
+      const currentConf = parseFloat(existing.avgConfidence || "0");
+      const newAvgConfidence =
+        (currentConf * existing.totalCalls + data.confidence) / newTotalCalls;
+      const newAvgResponseTime =
+        ((existing.avgResponseTime || 0) * existing.totalCalls + data.responseTime) / newTotalCalls;
+      const currentError = parseFloat(existing.errorRate || "0");
+      const newErrorRate =
+        (currentError * existing.totalCalls + (data.error ? 1 : 0)) / newTotalCalls;
 
-    return db.update(agentMetrics).set({
-      totalCalls: newTotalCalls,
-      avgConfidence: newAvgConfidence.toFixed(2),
-      avgResponseTime: Math.round(newAvgResponseTime),
-      errorRate: newErrorRate.toFixed(2),
-    }).where(eq(agentMetrics.agentName, agentName));
+      return db.update(schema.agentMetrics).set({
+        totalCalls: newTotalCalls,
+        avgConfidence: newAvgConfidence.toFixed(2),
+        avgResponseTime: Math.round(newAvgResponseTime),
+        errorRate: newErrorRate.toFixed(2),
+      }).where(orm.eq(schema.agentMetrics.agentName, agentName));
+    } else {
+      return db.insert(schema.agentMetrics).values({
+        agentName,
+        totalCalls: 1,
+        avgConfidence: data.confidence.toFixed(2),
+        avgResponseTime: data.responseTime,
+        errorRate: data.error ? "1.0" : "0.0",
+      });
+    }
+  }
+  // SQLite fallback
+  const existing = sqliteRun("SELECT * FROM agent_metrics WHERE agent_name = ? LIMIT 1", [agentName]);
+  if (existing[0]) {
+    const e = existing[0];
+    const newTotalCalls = (e.total_calls || 0) + 1;
+    const currentConf = parseFloat(e.avg_confidence || "0");
+    const newAvgConfidence = (currentConf * (e.total_calls || 0) + data.confidence) / newTotalCalls;
+    const newAvgResponseTime = ((e.avg_response_time || 0) * (e.total_calls || 0) + data.responseTime) / newTotalCalls;
+    const currentError = parseFloat(e.error_rate || "0");
+    const newErrorRate = (currentError * (e.total_calls || 0) + (data.error ? 1 : 0)) / newTotalCalls;
+    sqliteRun(
+      "UPDATE agent_metrics SET total_calls = ?, avg_confidence = ?, avg_response_time = ?, error_rate = ? WHERE agent_name = ?",
+      [newTotalCalls, newAvgConfidence.toFixed(2), Math.round(newAvgResponseTime), newErrorRate.toFixed(2), agentName]
+    );
   } else {
-    return db.insert(agentMetrics).values({
-      agentName,
-      totalCalls: 1,
-      avgConfidence: data.confidence.toFixed(2),
-      avgResponseTime: data.responseTime,
-      errorRate: data.error ? "1.0" : "0.0",
-    });
+    sqliteInsert(
+      "INSERT INTO agent_metrics (agent_name, total_calls, avg_confidence, avg_response_time, error_rate) VALUES (?, ?, ?, ?, ?)",
+      [agentName, 1, data.confidence.toFixed(2), data.responseTime, data.error ? "1.0" : "0.0"]
+    );
   }
 }
 
 export async function getAllAgentMetrics() {
-  return db.select().from(agentMetrics);
+  if (USE_MYSQL) {
+    const { db, schema } = await getMysqlDb();
+    return db.select().from(schema.agentMetrics);
+  }
+  return sqliteRun("SELECT * FROM agent_metrics");
 }
+
+// ── Learned Facts (Memory) ──────────────────────────────────────────────────
+export async function getLearnedFacts(limit = 50) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db.select().from(schema.learnedFacts).limit(limit);
+  }
+  return sqliteRun("SELECT * FROM learned_facts ORDER BY createdAt DESC LIMIT ?", [limit]);
+}
+
+export async function searchLearnedFacts(query: string, limit = 10) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db.select().from(schema.learnedFacts)
+      .where(orm.like(schema.learnedFacts.fact, `%${query}%`))
+      .limit(limit);
+  }
+  return sqliteRun("SELECT * FROM learned_facts WHERE fact LIKE ? ORDER BY createdAt DESC LIMIT ?", [`%${query}%`, limit]);
+}
+
+// ── Entity Memory ───────────────────────────────────────────────────────────
+export async function getEntityMemory(limit = 50) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db.select().from(schema.entityMemory).limit(limit);
+  }
+  return sqliteRun("SELECT * FROM entity_memory ORDER BY lastMentioned DESC LIMIT ?", [limit]);
+}
+
+export async function searchEntityMemory(query: string, limit = 10) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db.select().from(schema.entityMemory)
+      .where(orm.like(schema.entityMemory.name, `%${query}%`))
+      .limit(limit);
+  }
+  return sqliteRun("SELECT * FROM entity_memory WHERE name LIKE ? ORDER BY lastMentioned DESC LIMIT ?", [`%${query}%`, limit]);
+}
+
+// ── Messages (direct query) ────────────────────────────────────────────────
+export async function getMessageById(id: number) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const rows = await db.select().from(schema.messages).where(orm.eq(schema.messages.id, id)).limit(1);
+    return rows[0];
+  }
+  const rows = sqliteRun("SELECT * FROM messages WHERE id = ? LIMIT 1", [id]);
+  return rows[0];
+}
+
+export async function updateMessageRating(id: number, rating: number) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    await db.update(schema.messages).set({ userRating: rating }).where(orm.eq(schema.messages.id, id));
+    return;
+  }
+  sqliteRun("UPDATE messages SET userRating = ? WHERE id = ?", [rating, id]);
+}
+
+export async function getMessagesBeforeId(conversationId: number, beforeId: number, limit = 1) {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    return db.select().from(schema.messages)
+      .where(orm.and(
+        orm.eq(schema.messages.conversationId, conversationId),
+        orm.lt(schema.messages.id, beforeId)
+      ))
+      .orderBy(orm.desc(schema.messages.id))
+      .limit(limit);
+  }
+  return sqliteRun(
+    "SELECT * FROM messages WHERE conversationId = ? AND id < ? ORDER BY id DESC LIMIT ?",
+    [conversationId, beforeId, limit]
+  );
+}
+

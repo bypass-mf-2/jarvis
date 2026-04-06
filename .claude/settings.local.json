@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(ls server/[Aa]uto[Tt]rain*)",
+      "Bash(npx esbuild:*)",
+      "Bash(timeout 15 npx cross-env NODE_ENV=development tsx start-jarvis.ts)",
+      "Bash(timeout 45 npx cross-env NODE_ENV=development tsx start-jarvis.ts)",
+      "Bash(node -e ':*)",
+      "Bash(curl -s --max-time 3 http://localhost:11434/api/tags)",
+      "Bash(curl -s --max-time 3 http://localhost:8000/api/v2/heartbeat)",
+      "Bash(ollama pull:*)",
+      "Bash(pip install:*)",
+      "Bash(ollama list:*)",
+      "Bash(chroma run:*)",
+      "Bash(python -m chromadb.cli)",
+      "Bash(python -c \"import chromadb; print\\(chromadb.__file__\\)\")",
+      "Bash(python -c \"import chromadb; print\\(chromadb.__version__\\)\")",
+      "Bash(where chroma:*)",
+      "Bash(pip show:*)",
+      "Read(//c/Users/trevo/AppData/Roaming/Python/Python313/Scripts/**)",
+      "Read(//c/Python313/Scripts/**)",
+      "Bash(python -c \"from chromadb.cli.cli import app; app\\(\\)\" -- run --host localhost --port 8000)"
+    ]
+  }
+}

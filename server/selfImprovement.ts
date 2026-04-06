@@ -487,8 +487,8 @@ export async function performHealthCheck(): Promise<{
 
   // Check database connection
   try {
-    const { testDatabaseConnection } = await import("./db.js");
-    await testDatabaseConnection();
+    const { getSystemLogs } = await import("./db.js");
+    await getSystemLogs(1);
   } catch (err) {
     issues.push(`Database connection failed: ${err}`);
   }

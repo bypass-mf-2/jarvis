@@ -247,8 +247,7 @@ export function FileUploadPanel() {
               ref={folderInputRef}
               type="file"
               multiple
-              webkitdirectory=""
-              directory=""
+              {...{ webkitdirectory: "", directory: "" } as any}
               className="hidden"
               onChange={handleFileSelect}
             />

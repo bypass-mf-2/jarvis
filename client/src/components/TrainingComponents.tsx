@@ -5,9 +5,13 @@
  */
 
 import { useState } from "react";
-import { Star } from "lucide-react";
+import { Star, Brain, Zap, TrendingUp, Activity, Loader2 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 
 interface MessageRatingProps {
   messageId: number;
@@ -66,13 +70,6 @@ export function MessageRating({ messageId, currentRating }: MessageRatingProps) 
  * 
  * Shows training stats and controls
  */
-
-import { trpc } from "@/lib/trpc";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Brain, Zap, TrendingUp, Activity } from "lucide-react";
 
 export function TrainingDashboard() {
   const { data: stats, refetch } = trpc.training.getStats.useQuery();

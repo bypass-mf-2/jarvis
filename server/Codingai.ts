@@ -132,7 +132,7 @@ const IOS_SWIFT_KNOWLEDGE = `
 
 // ── Generate Coding System Prompt ─────────────────────────────────────────
 export function getCodingSystemPrompt(
-  language?: "swift" | "python" | "javascript" | "typescript",
+  language?: string,
   includeIOS = false
 ): string {
   let prompt = `You are an expert software engineer specializing in clean, efficient, production-quality code.

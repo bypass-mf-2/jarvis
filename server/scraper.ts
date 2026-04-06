@@ -194,7 +194,7 @@ export async function scrapeAllSources(): Promise<{
   failed: number;
 }> {
   const sources = await getScrapeSources();
-  const active = sources.filter((s: any) => s.isActive);
+  const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
   await logger.info("scraper", `Starting scheduled scrape of ${active.length} sources`);
 
   let succeeded = 0;

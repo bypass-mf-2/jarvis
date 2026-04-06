@@ -17,7 +17,7 @@ import {
   Upload
 } from "lucide-react";
 import { FileUploadPanel } from "@/components/FileUploadPanel";
-import { MessageRating } from "@/components/TrainingComponents";
+import { MessageRating, TrainingDashboard } from "@/components/TrainingComponents";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Message = {
@@ -26,6 +26,7 @@ type Message = {
   content: string;
   createdAt: Date;
   ragChunksUsed?: { id: string; source: string; distance: number }[] | null;
+  userRating?: number | null;
 };
 
 type Conversation = {
@@ -148,7 +149,7 @@ export default function Home() {
   });
 
   const applyPatch = trpc.selfImprovement.applyPatch.useMutation({
-    onSuccess: (r) => { toast.success(r.message); refetchPatches(); },
+    onSuccess: (r) => { toast.success((r as any).message ?? "Patch applied"); refetchPatches(); },
     onError: (e) => toast.error(e.message),
   });
 
@@ -646,7 +647,7 @@ export default function Home() {
                     <Streamdown>{msg.content}</Streamdown>
                     <MessageRating 
                         messageId={msg.id} 
-                        currentRating={msg.userRating}
+                        currentRating={msg.userRating ?? undefined}
                       />
                   </div>
                 ) : (

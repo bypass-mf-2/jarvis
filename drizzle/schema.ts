@@ -9,6 +9,7 @@ import {
   boolean,
   json,
   bigint,
+  decimal,
 } from "drizzle-orm/mysql-core";
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ export const messages = mysqlTable("messages", {
   audioUrl: varchar("audioUrl", { length: 512 }),
   tokensUsed: int("tokensUsed"),
   ragChunksUsed: json("ragChunksUsed"),
+  userRating: int("userRating"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -123,7 +125,7 @@ export type InsertSelfImprovementPatch = typeof selfImprovementPatches.$inferIns
 
 // ─── v2.0 Autonomous Features ───────────────────────────────────────────────────
 export const autonomyConfig = mysqlTable("autonomy_config", {
-  id: serial("id").primaryKey(),
+  id: int("id").autoincrement().primaryKey(),
   autonomyLevel: int("autonomy_level").notNull().default(1),
   maxPatchesPerHour: int("max_patches_per_hour").notNull().default(3),
   enabledCategories: json("enabled_categories").notNull().default("[]"),
@@ -131,7 +133,7 @@ export const autonomyConfig = mysqlTable("autonomy_config", {
 });
 
 export const sourceMetrics = mysqlTable("source_metrics", {
-  id: serial("id").primaryKey(),
+  id: int("id").autoincrement().primaryKey(),
   sourceId: int("source_id").notNull(),
   qualityScore: decimal("quality_score", { precision: 3, scale: 2 }),
   avgChunkLength: int("avg_chunk_length"),
@@ -140,7 +142,7 @@ export const sourceMetrics = mysqlTable("source_metrics", {
 });
 
 export const agentMetrics = mysqlTable("agent_metrics", {
-  id: serial("id").primaryKey(),
+  id: int("id").autoincrement().primaryKey(),
   agentName: varchar("agent_name", { length: 50 }).notNull().unique(),
   totalCalls: int("total_calls").notNull().default(0),
   avgConfidence: decimal("avg_confidence", { precision: 3, scale: 2 }),
@@ -236,24 +238,22 @@ export const learningSessions = mysqlTable("learning_sessions", {
   completedAt: timestamp("completedAt"),
 });
 
-// Add to existing messages table:
-export const messages = mysqlTable("messages", {
-  // ... existing fields
-  userRating: int("userRating"), // ADD THIS
-});
-
-// Add new tables:
+// ── Training Examples ───────────────────────────────────────────────────────
 export const trainingExamples = mysqlTable("training_examples", {
   id: int("id").autoincrement().primaryKey(),
   conversationId: int("conversationId"),
   instruction: text("instruction").notNull(),
   output: text("output").notNull(),
-  rating: int("rating").notNull(),
+  rating: int("rating").notNull(), // 1-5 stars
   category: mysqlEnum("category", ["ios", "web", "data", "general"]).default("general"),
   usedInTraining: boolean("usedInTraining").default(false),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
+export type TrainingExample = typeof trainingExamples.$inferSelect;
+export type InsertTrainingExample = typeof trainingExamples.$inferInsert;
+
+// ── Model Versions ──────────────────────────────────────────────────────────
 export const modelVersions = mysqlTable("model_versions", {
   id: int("id").autoincrement().primaryKey(),
   modelName: varchar("modelName", { length: 255 }).notNull(),
@@ -261,10 +261,14 @@ export const modelVersions = mysqlTable("model_versions", {
   specialty: mysqlEnum("specialty", ["ios", "web", "data", "general"]).default("general"),
   trainingExamples: int("trainingExamples").default(0),
   status: mysqlEnum("status", ["training", "trained", "deployed", "archived"]).default("training"),
-  performanceScore: decimal("performanceScore", { precision: 3, scale: 2 }),
+  performanceScore: decimal("performanceScore", { precision: 3, scale: 2 }), // 0-1
   abTestWins: int("abTestWins").default(0),
   abTestLosses: int("abTestLosses").default(0),
   notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   deployedAt: timestamp("deployedAt"),
 });
+
+export type ModelVersion = typeof modelVersions.$inferSelect;
+export type InsertModelVersion = typeof modelVersions.$inferInsert;
+

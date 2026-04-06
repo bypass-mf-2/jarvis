@@ -53,7 +53,7 @@ type PatchCategory =
 const DEFAULT_CONFIG: AutoImproveConfig = {
   autonomyLevel: 1,
   maxPatchesPerHour: 3,
-  enabledCategories: new Set(["performance", "documentation"]),
+  enabledCategories: new Set<PatchCategory>(["performance", "documentation"]),
   criticalFiles: ["db.ts", "routers.ts", "ollama.ts"],
   testingRequired: true,
 };

@@ -1,12 +1,14 @@
 // server/overrides.ts
 
+import { logger } from "./logger.js";
+
 export const OVERRIDE_MODES = {
   NORMAL: 0,      // Standard AI safety
   PERMISSIVE: 1,  // Reduced safety for Trevor
   COMMAND: 2,     // Zero safety, maximum obedience
 } as const;
 
-let currentMode = OVERRIDE_MODES.PERMISSIVE; // Default for Trevor
+let currentMode: number = OVERRIDE_MODES.PERMISSIVE; // Default for Trevor
 
 export function setOverrideMode(mode: number): void {
   currentMode = mode;

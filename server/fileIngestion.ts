@@ -189,9 +189,9 @@ async function processPDF(filepath: string): Promise<ProcessedFile> {
   
   try {
     // Extract text using pdf-parse or pdfjs-dist
-    const pdfParse = await import("pdf-parse");
+    const pdfParse = (await import("pdf-parse")) as any;
     const dataBuffer = fs.readFileSync(filepath);
-    const pdfData = await pdfParse.default(dataBuffer);
+    const pdfData = await (pdfParse.default || pdfParse)(dataBuffer);
     
     const text = pdfData.text;
     const pageCount = pdfData.numpages;
@@ -298,8 +298,8 @@ async function processDocument(filepath: string): Promise<ProcessedFile> {
     // For PowerPoint
     else if (ext === ".pptx" || ext === ".ppt") {
       // Use office-text-extractor or similar
-      const officeParser = await import("officeparser");
-      const text = await officeParser.parseOfficeAsync(filepath);
+      const officeParser = (await import("officeparser" as any)) as any;
+      const text: string = await officeParser.parseOfficeAsync(filepath);
       chunks = text.split(/\n\n+/).filter(c => c.length > 50);
     }
     

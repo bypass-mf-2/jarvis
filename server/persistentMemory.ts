@@ -1,27 +1,63 @@
 /**
  * Persistent Memory Manager
- * 
+ *
  * Automatically extracts and stores:
  * - Facts about Trevor from every conversation
  * - Entities (people, places, concepts)
  * - Cross-conversation context
  * - Everything learned from files
- * 
+ *
  * SURVIVES RESTARTS - Everything stored in database
  */
 
 import { ollamaChat } from "./ollama.js";
-import { db } from "./db.js";
-import { 
-  learnedFacts, 
-  entityMemory, 
-  conversationContext,
-  learningSessions,
-  messages,
-  conversations,
-} from "../drizzle/schema.js";
-import { eq, desc } from "drizzle-orm";
+import {
+  getMessages,
+  getConversations,
+  getLearnedFacts,
+  searchLearnedFacts,
+  getEntityMemory,
+  searchEntityMemory,
+} from "./db.js";
+import { getDatabase, saveDatabase } from "./sqlite-init.js";
 import { logger } from "./logger.js";
+
+const USE_MYSQL = !!process.env.DATABASE_URL;
+
+// ── SQLite helpers (local to this module) ───────────────────────────────────
+function sqliteRun(sql: string, params: any[] = []): any[] {
+  const db = getDatabase();
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const results: any[] = [];
+  while (stmt.step()) results.push(stmt.getAsObject());
+  stmt.free();
+  saveDatabase();
+  return results;
+}
+
+function sqliteInsert(sql: string, params: any[] = []): number {
+  const db = getDatabase();
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  stmt.step();
+  stmt.free();
+  saveDatabase();
+  return (db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number) ?? 1;
+}
+
+// ── MySQL Drizzle lazy loader ───────────────────────────────────────────────
+let _drizzle: any = null;
+async function getDrizzle() {
+  if (!_drizzle) {
+    const orm = await import("drizzle-orm");
+    const schema = await import("../drizzle/schema.js");
+    const { drizzle } = await import("drizzle-orm/mysql2");
+    const db = drizzle(process.env.DATABASE_URL!);
+    _drizzle = { db, orm, schema };
+  }
+  return _drizzle;
+}
 
 // ── Extract Facts from Conversation ─────────────────────────────────────────
 export async function extractFactsFromConversation(
@@ -30,28 +66,30 @@ export async function extractFactsFromConversation(
   await logger.info("memory", `Extracting facts from conversation ${conversationId}`);
 
   // Create learning session
-  const [session] = await db.insert(learningSessions).values({
-    sessionType: "conversation_analysis",
-    itemsProcessed: 0,
-    factsLearned: 0,
-  });
+  let sessionId: number;
+  if (USE_MYSQL) {
+    const { db, schema } = await getDrizzle();
+    const [session] = await db.insert(schema.learningSessions).values({
+      sessionType: "conversation_analysis",
+      itemsProcessed: 0,
+      factsLearned: 0,
+    });
+    sessionId = session.insertId;
+  } else {
+    sessionId = sqliteInsert(
+      "INSERT INTO learning_sessions (sessionType, itemsProcessed, factsLearned, startedAt) VALUES (?, ?, ?, ?)",
+      ["conversation_analysis", 0, 0, Date.now()]
+    );
+  }
 
   try {
-    // Get all messages from this conversation
-    const msgs = await db
-      .select()
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId))
-      .orderBy(messages.createdAt);
-
+    const msgs = await getMessages(conversationId);
     if (msgs.length === 0) return 0;
 
-    // Build conversation text
     const conversationText = msgs
-      .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+      .map((m: any) => `${m.role.toUpperCase()}: ${m.content}`)
       .join("\n\n");
 
-    // Extract facts using LLM
     const prompt = `Analyze this conversation and extract ALL factual information about Trevor (the user).
 
 Conversation:
@@ -80,81 +118,98 @@ Return as JSON:
 Only include facts with confidence > 0.70. Be THOROUGH - extract EVERYTHING.`;
 
     const response = await ollamaChat([{ role: "user", content: prompt }]);
-    
-    // Parse JSON
+
     const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("Failed to extract facts");
-    }
+    if (!jsonMatch) throw new Error("Failed to extract facts");
 
     const extracted = JSON.parse(jsonMatch[0]);
     let factsLearned = 0;
 
-    // Store each fact
     for (const [category, facts] of Object.entries(extracted)) {
       for (const factData of facts as any[]) {
-        // Check if we already know this fact
-        const existing = await db
-          .select()
-          .from(learnedFacts)
-          .where(eq(learnedFacts.fact, factData.fact))
-          .limit(1);
+        if (USE_MYSQL) {
+          const { db, schema, orm } = await getDrizzle();
+          const existing = await db
+            .select()
+            .from(schema.learnedFacts)
+            .where(orm.eq(schema.learnedFacts.fact, factData.fact))
+            .limit(1);
 
-        if (existing.length === 0) {
-          // New fact - store it
-          await db.insert(learnedFacts).values({
-            category: category as any,
-            fact: factData.fact,
-            confidence: factData.confidence.toFixed(2),
-            sourceConversationId: conversationId,
-            verified: false,
-            timesReferenced: 0,
-          });
-          factsLearned++;
+          if (existing.length === 0) {
+            await db.insert(schema.learnedFacts).values({
+              category: category as any,
+              fact: factData.fact,
+              confidence: factData.confidence.toFixed(2),
+              sourceConversationId: conversationId,
+              verified: false,
+              timesReferenced: 0,
+            });
+            factsLearned++;
+          } else {
+            await db
+              .update(schema.learnedFacts)
+              .set({
+                confidence: Math.max(
+                  parseFloat(existing[0].confidence),
+                  factData.confidence
+                ).toFixed(2),
+                timesReferenced: existing[0].timesReferenced + 1,
+                updatedAt: new Date(),
+              })
+              .where(orm.eq(schema.learnedFacts.id, existing[0].id));
+          }
         } else {
-          // Fact exists - update confidence and reference count
-          await db
-            .update(learnedFacts)
-            .set({
-              confidence: Math.max(
-                parseFloat(existing[0].confidence),
-                factData.confidence
-              ).toFixed(2),
-              timesReferenced: existing[0].timesReferenced + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(learnedFacts.id, existing[0].id));
+          const existing = sqliteRun("SELECT * FROM learned_facts WHERE fact = ? LIMIT 1", [factData.fact]);
+          if (existing.length === 0) {
+            sqliteInsert(
+              "INSERT INTO learned_facts (category, fact, confidence, sourceConversationId, verified, timesReferenced, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              [category, factData.fact, factData.confidence.toFixed(2), conversationId, 0, 0, Date.now(), Date.now()]
+            );
+            factsLearned++;
+          } else {
+            sqliteRun(
+              "UPDATE learned_facts SET confidence = ?, timesReferenced = timesReferenced + 1, updatedAt = ? WHERE id = ?",
+              [Math.max(parseFloat(existing[0].confidence), factData.confidence).toFixed(2), Date.now(), existing[0].id]
+            );
+          }
         }
       }
     }
 
     // Update session
-    await db
-      .update(learningSessions)
-      .set({
+    if (USE_MYSQL) {
+      const { db, schema, orm } = await getDrizzle();
+      await db.update(schema.learningSessions).set({
         itemsProcessed: msgs.length,
         factsLearned,
         status: "success",
         completedAt: new Date(),
-      })
-      .where(eq(learningSessions.id, session.id));
+      }).where(orm.eq(schema.learningSessions.id, sessionId));
+    } else {
+      sqliteRun(
+        "UPDATE learning_sessions SET itemsProcessed = ?, factsLearned = ?, status = ?, completedAt = ? WHERE id = ?",
+        [msgs.length, factsLearned, "success", Date.now(), sessionId]
+      );
+    }
 
     await logger.info("memory", `Learned ${factsLearned} new facts from conversation ${conversationId}`);
-    
     return factsLearned;
 
   } catch (err) {
     await logger.error("memory", `Fact extraction failed: ${err}`);
-    
-    await db
-      .update(learningSessions)
-      .set({
+    if (USE_MYSQL) {
+      const { db, schema, orm } = await getDrizzle();
+      await db.update(schema.learningSessions).set({
         status: "error",
         notes: String(err),
         completedAt: new Date(),
-      })
-      .where(eq(learningSessions.id, session.id));
-    
+      }).where(orm.eq(schema.learningSessions.id, sessionId));
+    } else {
+      sqliteRun(
+        "UPDATE learning_sessions SET status = ?, notes = ?, completedAt = ? WHERE id = ?",
+        ["error", String(err), Date.now(), sessionId]
+      );
+    }
     return 0;
   }
 }
@@ -165,14 +220,8 @@ export async function extractEntitiesFromConversation(
 ): Promise<number> {
   await logger.info("memory", `Extracting entities from conversation ${conversationId}`);
 
-  const msgs = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.conversationId, conversationId));
-
-  const conversationText = msgs
-    .map(m => m.content)
-    .join("\n\n");
+  const msgs = await getMessages(conversationId);
+  const conversationText = msgs.map((m: any) => m.content).join("\n\n");
 
   const prompt = `Extract all named entities from this conversation:
 
@@ -194,46 +243,56 @@ Only include important entities (importance > 0.5).`;
   try {
     const response = await ollamaChat([{ role: "user", content: prompt }]);
     const jsonMatch = response.match(/\[[\s\S]*\]/);
-    
     if (!jsonMatch) return 0;
 
     const entities = JSON.parse(jsonMatch[0]);
     let entitiesAdded = 0;
 
     for (const entity of entities) {
-      // Check if entity exists
-      const existing = await db
-        .select()
-        .from(entityMemory)
-        .where(eq(entityMemory.name, entity.name))
-        .limit(1);
+      if (USE_MYSQL) {
+        const { db, schema, orm } = await getDrizzle();
+        const existing = await db
+          .select()
+          .from(schema.entityMemory)
+          .where(orm.eq(schema.entityMemory.name, entity.name))
+          .limit(1);
 
-      if (existing.length === 0) {
-        // New entity
-        await db.insert(entityMemory).values({
-          name: entity.name,
-          type: entity.type,
-          description: entity.description,
-          attributes: entity.attributes,
-          importance: entity.importance.toFixed(2),
-          mentionCount: 1,
-          firstMentioned: new Date(),
-          lastMentioned: new Date(),
-        });
-        entitiesAdded++;
-      } else {
-        // Update existing
-        await db
-          .update(entityMemory)
-          .set({
+        if (existing.length === 0) {
+          await db.insert(schema.entityMemory).values({
+            name: entity.name,
+            type: entity.type,
+            description: entity.description,
+            attributes: entity.attributes,
+            importance: entity.importance.toFixed(2),
+            mentionCount: 1,
+            firstMentioned: new Date(),
+            lastMentioned: new Date(),
+          });
+          entitiesAdded++;
+        } else {
+          await db.update(schema.entityMemory).set({
             mentionCount: existing[0].mentionCount + 1,
             lastMentioned: new Date(),
             importance: Math.max(
               parseFloat(existing[0].importance),
               entity.importance
             ).toFixed(2),
-          })
-          .where(eq(entityMemory.id, existing[0].id));
+          }).where(orm.eq(schema.entityMemory.id, existing[0].id));
+        }
+      } else {
+        const existing = sqliteRun("SELECT * FROM entity_memory WHERE name = ? LIMIT 1", [entity.name]);
+        if (existing.length === 0) {
+          sqliteInsert(
+            "INSERT INTO entity_memory (name, type, description, attributes, importance, mentionCount, firstMentioned, lastMentioned, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [entity.name, entity.type, entity.description, JSON.stringify(entity.attributes), entity.importance.toFixed(2), 1, Date.now(), Date.now(), Date.now(), Date.now()]
+          );
+          entitiesAdded++;
+        } else {
+          sqliteRun(
+            "UPDATE entity_memory SET mentionCount = mentionCount + 1, lastMentioned = ?, importance = ?, updatedAt = ? WHERE id = ?",
+            [Date.now(), Math.max(parseFloat(existing[0].importance || "0"), entity.importance).toFixed(2), Date.now(), existing[0].id]
+          );
+        }
       }
     }
 
@@ -249,13 +308,9 @@ Only include important entities (importance > 0.5).`;
 export async function summarizeConversation(
   conversationId: number
 ): Promise<void> {
-  const msgs = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.conversationId, conversationId));
-
+  const msgs = await getMessages(conversationId);
   const conversationText = msgs
-    .map(m => `${m.role}: ${m.content}`)
+    .map((m: any) => `${m.role}: ${m.content}`)
     .join("\n");
 
   const prompt = `Summarize this conversation:
@@ -274,21 +329,26 @@ Return as JSON:
   try {
     const response = await ollamaChat([{ role: "user", content: prompt }]);
     const jsonMatch = response.match(/\{[\s\S]*\}/);
-    
     if (!jsonMatch) return;
 
     const summary = JSON.parse(jsonMatch[0]);
 
-    // Store context
-    await db.insert(conversationContext).values({
-      conversationId,
-      topicSummary: summary.summary,
-      keyTopics: summary.keyTopics,
-      sentiment: summary.sentiment,
-      followUpNeeded: summary.followUpNeeded,
-      followUpTopic: summary.followUpTopic,
-    });
-
+    if (USE_MYSQL) {
+      const { db, schema } = await getDrizzle();
+      await db.insert(schema.conversationContext).values({
+        conversationId,
+        topicSummary: summary.summary,
+        keyTopics: summary.keyTopics,
+        sentiment: summary.sentiment,
+        followUpNeeded: summary.followUpNeeded,
+        followUpTopic: summary.followUpTopic,
+      });
+    } else {
+      sqliteInsert(
+        "INSERT INTO conversation_context (conversationId, topicSummary, keyTopics, sentiment, followUpNeeded, followUpTopic, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [conversationId, summary.summary, JSON.stringify(summary.keyTopics), summary.sentiment, summary.followUpNeeded ? 1 : 0, summary.followUpTopic, Date.now(), Date.now()]
+      );
+    }
   } catch (err) {
     await logger.error("memory", `Conversation summarization failed: ${err}`);
   }
@@ -299,21 +359,14 @@ export async function recallRelevantFacts(
   query: string,
   limit = 10
 ): Promise<any[]> {
-  // Simple keyword matching for now
-  // TODO: Use vector similarity with embeddings
-  
-  const allFacts = await db
-    .select()
-    .from(learnedFacts)
-    .orderBy(desc(learnedFacts.confidence))
-    .limit(100);
-
-  const queryLower = query.toLowerCase();
-  const relevant = allFacts
-    .filter(f => f.fact.toLowerCase().includes(queryLower))
-    .slice(0, limit);
-
-  return relevant;
+  if (USE_MYSQL) {
+    return searchLearnedFacts(query, limit);
+  }
+  // SQLite: keyword search
+  return sqliteRun(
+    "SELECT * FROM learned_facts WHERE fact LIKE ? ORDER BY confidence DESC LIMIT ?",
+    [`%${query}%`, limit]
+  );
 }
 
 // ── Recall Related Entities ─────────────────────────────────────────────────
@@ -321,21 +374,13 @@ export async function recallEntities(
   query: string,
   limit = 5
 ): Promise<any[]> {
-  const allEntities = await db
-    .select()
-    .from(entityMemory)
-    .orderBy(desc(entityMemory.importance))
-    .limit(50);
-
-  const queryLower = query.toLowerCase();
-  const relevant = allEntities
-    .filter(e => 
-      e.name.toLowerCase().includes(queryLower) ||
-      e.description?.toLowerCase().includes(queryLower)
-    )
-    .slice(0, limit);
-
-  return relevant;
+  if (USE_MYSQL) {
+    return searchEntityMemory(query, limit);
+  }
+  return sqliteRun(
+    "SELECT * FROM entity_memory WHERE name LIKE ? OR description LIKE ? ORDER BY importance DESC LIMIT ?",
+    [`%${query}%`, `%${query}%`, limit]
+  );
 }
 
 // ── Get Memory Context for Query ────────────────────────────────────────────
@@ -343,9 +388,7 @@ export async function getMemoryContext(query: string): Promise<string> {
   const facts = await recallRelevantFacts(query, 5);
   const entities = await recallEntities(query, 3);
 
-  if (facts.length === 0 && entities.length === 0) {
-    return "";
-  }
+  if (facts.length === 0 && entities.length === 0) return "";
 
   let context = "=== PERSISTENT MEMORY ===\n\n";
 
@@ -366,7 +409,6 @@ export async function getMemoryContext(query: string): Promise<string> {
   }
 
   context += "=== END MEMORY ===\n\n";
-
   return context;
 }
 
@@ -377,20 +419,14 @@ export async function processConversationMemory(
   await logger.info("memory", `Processing memory for conversation ${conversationId}`);
 
   try {
-    // Extract facts
     const factsLearned = await extractFactsFromConversation(conversationId);
-    
-    // Extract entities
     const entitiesFound = await extractEntitiesFromConversation(conversationId);
-    
-    // Summarize conversation
     await summarizeConversation(conversationId);
 
     await logger.info(
       "memory",
       `Processed conversation ${conversationId}: ${factsLearned} facts, ${entitiesFound} entities`
     );
-
   } catch (err) {
     await logger.error("memory", `Memory processing failed: ${err}`);
   }
@@ -405,24 +441,29 @@ export function startMemoryConsolidation(intervalMs = 60 * 60 * 1000): void {
   logger.info("memory", "Memory consolidation started (every hour)");
 
   memoryInterval = setInterval(async () => {
-    // Process recent conversations that haven't been processed
-    const recentConvs = await db
-      .select()
-      .from(conversations)
-      .orderBy(desc(conversations.updatedAt))
-      .limit(10);
+    const recentConvs = await getConversations();
 
-    for (const conv of recentConvs) {
+    for (const conv of recentConvs.slice(0, 10)) {
       // Check if already processed
-      const existing = await db
-        .select()
-        .from(conversationContext)
-        .where(eq(conversationContext.conversationId, conv.id))
-        .limit(1);
+      let alreadyProcessed = false;
+      if (USE_MYSQL) {
+        const { db, schema, orm } = await getDrizzle();
+        const existing = await db
+          .select()
+          .from(schema.conversationContext)
+          .where(orm.eq(schema.conversationContext.conversationId, conv.id))
+          .limit(1);
+        alreadyProcessed = existing.length > 0;
+      } else {
+        const existing = sqliteRun(
+          "SELECT id FROM conversation_context WHERE conversationId = ? LIMIT 1",
+          [conv.id]
+        );
+        alreadyProcessed = existing.length > 0;
+      }
 
-      if (existing.length === 0) {
+      if (!alreadyProcessed) {
         await processConversationMemory(conv.id);
-        // Wait a bit between processing
         await new Promise(r => setTimeout(r, 5000));
       }
     }

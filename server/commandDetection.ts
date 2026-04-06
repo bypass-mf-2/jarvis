@@ -1,5 +1,10 @@
 // server/commandDetection.ts
 
+import { logger } from "./logger.js";
+import { addMessage } from "./db.js";
+import { ollamaChat } from "./ollama.js";
+import { COMMAND_SYSTEM_PROMPT } from "./obedience.js";
+
 export function isDirectCommand(message: string): boolean {
   const commandPhrases = [
     /^do this/i,
