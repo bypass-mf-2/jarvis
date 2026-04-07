@@ -37,100 +37,100 @@ const DEFAULT_SOURCES = [
     name: "BBC News",
     url: "https://feeds.bbci.co.uk/news/rss.xml",
     type: "rss" as const,
-    intervalMinutes: 60,
+    intervalMinutes: 15,
   },
   {
     name: "Reuters",
     url: "https://feeds.reuters.com/reuters/topNews",
     type: "rss" as const,
-    intervalMinutes: 60,
+    intervalMinutes: 15,
   },
   {
     name: "The Guardian",
     url: "https://www.theguardian.com/world/rss",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   {
     name: "NPR News",
     url: "https://feeds.npr.org/1001/rss.xml",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   // Technology & AI
   {
     name: "TechCrunch",
     url: "https://techcrunch.com/feed/",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   {
     name: "Hacker News",
     url: "https://news.ycombinator.com/rss",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   {
     name: "ArXiv AI",
     url: "https://arxiv.org/rss/cs.AI",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "ArXiv ML",
     url: "https://arxiv.org/rss/cs.LG",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "OpenAI Blog",
     url: "https://openai.com/blog/rss.xml",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "DeepMind Blog",
     url: "https://www.deepmind.com/blog/rss.xml",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   // Science & Research
   {
     name: "Nature",
     url: "https://www.nature.com/nature.rss",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "Science Daily",
     url: "https://www.sciencedaily.com/rss/all.xml",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "MIT Technology Review",
     url: "https://www.technologyreview.com/feed/",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   // Programming & Development
   {
     name: "Dev.to",
     url: "https://dev.to/api/articles?state=fresh&top=7",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
   {
     name: "GitHub Trending",
     url: "https://github.com/trending/typescript.rss",
     type: "rss" as const,
-    intervalMinutes: 240,
+    intervalMinutes: 15,
   },
   {
     name: "Stack Overflow",
     url: "https://stackoverflow.com/feeds/tag/javascript",
     type: "rss" as const,
-    intervalMinutes: 120,
+    intervalMinutes: 15,
   },
 ];
 
@@ -189,13 +189,16 @@ export async function initializeServices(): Promise<void> {
     }
   }
 
-  // Start scraper (every 60 minutes)
-  const scraperInterval = parseInt(process.env.SCRAPER_INTERVAL_MS ?? "3600000");
+  // Start scraper (every 1 minute)
+  const scraperInterval = parseInt(process.env.SCRAPER_INTERVAL_MS ?? "60000");
   startScraperScheduler(scraperInterval);
 
   // Start self-improvement (every 6 hours)
   const improvementInterval = parseInt(process.env.IMPROVEMENT_INTERVAL_MS ?? "21600000");
   startSelfImprovementScheduler(improvementInterval);
+
+  // Start web crawl & source discovery (every 2 minutes)
+  startSourceDiscoveryScheduler(60 * 1000);
 
   await logger.info("services", "All background services initialized");
 }
@@ -217,5 +220,9 @@ export async function startBackgroundServices() {
   // Start auto-training (runs weekly)
   startAutoTraining(7 * 24 * 60 * 60 * 1000);
 
+  // Start web crawl & source discovery (every 2 minutes)
+  startSourceDiscoveryScheduler(60 * 1000);
+
   logger.info("services", "All systems online - JARVIS activated");
 }
+

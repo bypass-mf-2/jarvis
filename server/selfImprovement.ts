@@ -15,7 +15,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 import { logger } from "./logger.js";
 
 const BACKUP_DIR = path.join(process.cwd(), ".jarvis-backups");

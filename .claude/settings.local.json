@@ -20,7 +20,19 @@
       "Bash(pip show:*)",
       "Read(//c/Users/trevo/AppData/Roaming/Python/Python313/Scripts/**)",
       "Read(//c/Python313/Scripts/**)",
-      "Bash(python -c \"from chromadb.cli.cli import app; app\\(\\)\" -- run --host localhost --port 8000)"
+      "Bash(python -c \"from chromadb.cli.cli import app; app\\(\\)\" -- run --host localhost --port 8000)",
+      "Bash(xargs grep:*)",
+      "Bash(wc -l server/*.ts)",
+      "Bash(ls tsconfig*.json package.json)",
+      "Bash(python -m chromadb.cli.cli run --help)",
+      "Bash(python -m chromadb.cli run --help)",
+      "Bash(python -c \"from chromadb.cli.cli import app; app\\(\\)\" -- run)",
+      "Bash(where.exe chroma:*)",
+      "Bash(ls:*)",
+      "Bash(\"/c/Users/trevo/AppData/Roaming/Python/Python313/Scripts/chroma.exe\" run:*)",
+      "Bash(curl -s http://localhost:8000/api/v2/heartbeat)",
+      "Bash(curl -s http://localhost:11434/api/tags)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")"
     ]
   }
 }

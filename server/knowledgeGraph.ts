@@ -5,7 +5,7 @@
  * Enables reasoning across the knowledge base
  */
 
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 import { getKnowledgeChunks } from "./db.js";
 import { logger } from "./logger.js";
 import * as fs from "fs";

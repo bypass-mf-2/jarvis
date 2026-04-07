@@ -103,11 +103,14 @@ export default function Home() {
     },
   });
 
+  const [lastFailedMessage, setLastFailedMessage] = useState<{ conversationId: number; content: string } | null>(null);
+
   const sendMessage = trpc.chat.sendMessage.useMutation({
     onSuccess: () => {
       refetchMessages();
       refetchConvs();
       setIsSending(false);
+      setLastFailedMessage(null);
     },
     onError: (err) => {
       toast.error(`Error: ${err.message}`);
@@ -323,12 +326,34 @@ export default function Home() {
   setInput("");
   setIsSending(true);
 
-  sendMessage.mutate(
-    { conversationId: convId, content: text },
-    {
+  const payload = { conversationId: convId, content: text };
+  setLastFailedMessage(payload);
+
+  sendMessage.mutate(payload, {
       onSuccess: (data) => {
         setIsSending(false);
-        refetchMessages(); // ✅ ADD THIS LINE
+        setLastFailedMessage(null);
+        refetchMessages();
+        if (voiceEnabled && data.message?.content) {
+          speakText(data.message.content);
+        }
+      },
+      onError: () => {
+        setIsSending(false);
+        // lastFailedMessage stays set so user can retry
+      },
+    }
+  );
+}, [input, activeConvId, voiceEnabled, refetchMessages]);
+
+  const handleRetry = useCallback(() => {
+    if (!lastFailedMessage || isSending) return;
+    setIsSending(true);
+    sendMessage.mutate(lastFailedMessage, {
+      onSuccess: (data) => {
+        setIsSending(false);
+        setLastFailedMessage(null);
+        refetchMessages();
         if (voiceEnabled && data.message?.content) {
           speakText(data.message.content);
         }
@@ -336,9 +361,8 @@ export default function Home() {
       onError: () => {
         setIsSending(false);
       },
-    }
-  );
-}, [input, activeConvId, voiceEnabled, refetchMessages]); // ✅ ADD refetchMessages to deps
+    });
+  }, [lastFailedMessage, isSending, voiceEnabled, refetchMessages]);
 
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -678,6 +702,21 @@ export default function Home() {
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm">Processing...</span>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {!isSending && lastFailedMessage && (
+            <div className="flex gap-3 mb-4">
+              <div className="w-8 h-8 rounded-full flex items-center justify-center bg-red-500/10 border border-red-500/30">
+                <AlertTriangle className="w-4 h-4 text-red-400" />
+              </div>
+              <div className="rounded-xl px-4 py-3 bg-card border border-red-500/30">
+                <p className="text-sm text-red-400 mb-2">Response failed — timed out or lost connection.</p>
+                <Button size="sm" variant="outline" onClick={handleRetry} className="gap-2">
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </Button>
               </div>
             </div>
           )}

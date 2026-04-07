@@ -1,0 +1,13 @@
+sock_fd, self._read_ready)
+        if waiter is not None:
+            # only wake up the waiter when connection_made() has been called
+            self._loop.call_soon(futures._set_result_unless_cancelled,
+                                 waiter, None)
+
+    def get_write_buffer_size(self):
+        return self._buffer_size
+
+    def _read_ready(self):
+        if self._conn_lost:
+            return
+ 

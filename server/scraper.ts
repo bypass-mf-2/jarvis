@@ -98,7 +98,41 @@ async function scrapeURL(url: string): Promise<{ title: string; content: string 
   return { title, content };
 }
 
-// ── Store chunks to DB + vector store ────────────────────────────────────────
+// ── Queue of chunks waiting to be embedded (processed in background) ─────────
+interface PendingEmbed {
+  chromaId: string;
+  content: string;
+  metadata: Record<string, string>;
+}
+const _embedQueue: PendingEmbed[] = [];
+let _embeddingInProgress = false;
+
+// Process embed queue in background — 1 chunk at a time with pauses
+// so Ollama stays responsive for user chat
+async function processEmbedQueue(): Promise<void> {
+  if (_embeddingInProgress || _embedQueue.length === 0) return;
+  _embeddingInProgress = true;
+
+  try {
+    while (_embedQueue.length > 0) {
+      const item = _embedQueue.shift()!;
+      try {
+        await addToVectorStore(item.chromaId, item.content, item.metadata);
+      } catch {
+        // skip failed embeds
+      }
+      // Small pause between embeds to let user chat requests through
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  } finally {
+    _embeddingInProgress = false;
+  }
+}
+
+// Start background embed processor (runs every 10s)
+setInterval(() => processEmbedQueue(), 10_000);
+
+// ── Store chunks to DB (embedding is queued for background) ─────────────────
 async function storeChunks(
   sourceId: number,
   sourceUrl: string,
@@ -122,12 +156,16 @@ async function storeChunks(
         tags: [],
       });
 
-      // Embed and store in ChromaDB
-      await addToVectorStore(chromaId, chunk, {
-        sourceUrl,
-        sourceTitle: itemTitle || sourceTitle,
-        sourceType,
-        dbId: String(row?.id ?? ""),
+      // Queue embedding for background processing (don't block scraping or Ollama)
+      _embedQueue.push({
+        chromaId,
+        content: chunk,
+        metadata: {
+          sourceUrl,
+          sourceTitle: itemTitle || sourceTitle,
+          sourceType,
+          dbId: String(row?.id ?? ""),
+        },
       });
 
       stored++;
@@ -187,43 +225,114 @@ export async function scrapeSource(source: {
   }
 }
 
-// ── Scrape all active sources ─────────────────────────────────────────────────
+// ── Scrape lock (prevents overlapping cycles) ───────────────────────────────
+let _scraping = false;
+
+// ── Scrape sources that are due (respects per-source intervalMinutes) ────────
+export async function scrapeDueSources(): Promise<{
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+}> {
+  if (_scraping) {
+    await logger.info("scraper", "Previous scrape still running, skipping this cycle");
+    return { total: 0, succeeded: 0, failed: 0, skipped: 0 };
+  }
+
+  _scraping = true;
+  try {
+    const sources = await getScrapeSources();
+    const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
+
+    let succeeded = 0;
+    let failed = 0;
+    let skipped = 0;
+    const due: typeof active = [];
+
+    for (const source of active) {
+      const intervalMin = source.intervalMinutes || 15;
+      const lastScraped = source.lastScrapedAt
+        ? new Date(source.lastScrapedAt).getTime()
+        : 0;
+      const minutesSince = (Date.now() - lastScraped) / 60_000;
+
+      if (minutesSince >= intervalMin) {
+        due.push(source);
+      } else {
+        skipped++;
+      }
+    }
+
+    if (due.length === 0) return { total: 0, succeeded: 0, failed: 0, skipped };
+
+    await logger.info("scraper", `Scraping ${due.length} due sources (${skipped} not yet due)`);
+
+    for (const source of due) {
+      const result = await scrapeSource({
+        id: source.id,
+        url: source.url,
+        name: source.name,
+        type: source.type,
+      });
+      if (result.error) failed++;
+      else succeeded++;
+    }
+
+    await logger.info("scraper", `Scrape complete: ${succeeded} succeeded, ${failed} failed`);
+    return { total: due.length, succeeded, failed, skipped };
+  } finally {
+    _scraping = false;
+  }
+}
+
+// ── Scrape all (force, for manual trigger) ───────────────────────────────────
 export async function scrapeAllSources(): Promise<{
   total: number;
   succeeded: number;
   failed: number;
 }> {
-  const sources = await getScrapeSources();
-  const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
-  await logger.info("scraper", `Starting scheduled scrape of ${active.length} sources`);
-
-  let succeeded = 0;
-  let failed = 0;
-
-  for (const source of active) {
-    const result = await scrapeSource({
-      id: source.id,
-      url: source.url,
-      name: source.name,
-      type: source.type,
-    });
-    if (result.error) failed++;
-    else succeeded++;
+  if (_scraping) {
+    return { total: 0, succeeded: 0, failed: 0 };
   }
 
-  await logger.info("scraper", `Scrape complete: ${succeeded} succeeded, ${failed} failed`);
-  return { total: active.length, succeeded, failed };
+  _scraping = true;
+  try {
+    const sources = await getScrapeSources();
+    const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
+    await logger.info("scraper", `Force scraping all ${active.length} sources`);
+
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const source of active) {
+      const result = await scrapeSource({
+        id: source.id,
+        url: source.url,
+        name: source.name,
+        type: source.type,
+      });
+      if (result.error) failed++;
+      else succeeded++;
+    }
+
+    await logger.info("scraper", `Scrape complete: ${succeeded} succeeded, ${failed} failed`);
+    return { total: active.length, succeeded, failed };
+  } finally {
+    _scraping = false;
+  }
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 let scraperInterval: ReturnType<typeof setInterval> | null = null;
 
-export function startScraperScheduler(intervalMs = 60 * 60 * 1000): void {
+export function startScraperScheduler(intervalMs = 60 * 1000): void {
   if (scraperInterval) return;
-  logger.info("scraper", `Scraper scheduler started (interval: ${intervalMs / 60000} min)`);
-  // Initial scrape after 30 seconds
-  setTimeout(() => scrapeAllSources(), 30_000);
-  scraperInterval = setInterval(() => scrapeAllSources(), intervalMs);
+  logger.info("scraper", `Scraper scheduler started (checking every ${intervalMs / 1000}s)`);
+  // Initial scrape after 15 seconds
+  setTimeout(() => scrapeDueSources(), 15_000);
+  // Then check which sources are due every tick
+  scraperInterval = setInterval(() => scrapeDueSources(), intervalMs);
 }
 
 export function stopScraperScheduler(): void {

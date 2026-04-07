@@ -16,7 +16,7 @@ import * as path from "path";
 import { execSync } from "child_process";
 import { getDatabase, saveDatabase } from "./sqlite-init.js";
 import { logger } from "./logger.js";
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 
 const USE_MYSQL = !!process.env.DATABASE_URL;
 
@@ -374,14 +374,19 @@ export async function trainSpecializedModel(
 export async function smartRouteModel(query: string): Promise<string> {
   const lower = query.toLowerCase();
 
-  if (lower.match(/swift|ios|swiftui|uikit|xcode|iphone|ipad|macos/)) {
-    try { execSync(`ollama list | grep trevor-ios`, { stdio: "pipe" }); return "trevor-ios"; } catch {}
+  // Use cached model list instead of blocking execSync
+  const { listOllamaModels } = await import("./ollama.js");
+  const models = await listOllamaModels();
+  const modelSet = new Set(models.map(m => m.replace(/:latest$/, "")));
+
+  if (lower.match(/swift|ios|swiftui|uikit|xcode|iphone|ipad|macos/) && modelSet.has("trevor-ios")) {
+    return "trevor-ios";
   }
-  if (lower.match(/react|vue|angular|html|css|javascript|typescript|website|frontend|backend|node/)) {
-    try { execSync(`ollama list | grep trevor-web`, { stdio: "pipe" }); return "trevor-web"; } catch {}
+  if (lower.match(/react|vue|angular|html|css|javascript|typescript|website|frontend|backend|node/) && modelSet.has("trevor-web")) {
+    return "trevor-web";
   }
-  if (lower.match(/data|analyze|pandas|numpy|matplotlib|csv|excel|chart|graph|visualiz/)) {
-    try { execSync(`ollama list | grep trevor-data`, { stdio: "pipe" }); return "trevor-data"; } catch {}
+  if (lower.match(/data|analyze|pandas|numpy|matplotlib|csv|excel|chart|graph|visualiz/) && modelSet.has("trevor-data")) {
+    return "trevor-data";
   }
 
   return await getCurrentModel();

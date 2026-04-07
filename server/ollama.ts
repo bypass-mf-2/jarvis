@@ -1,10 +1,13 @@
 /**
- * Ollama integration helper
- * Handles chat completions, streaming, and embeddings via the local Ollama HTTP API.
- * Falls back to the built-in Forge LLM when Ollama is unavailable.
+ * Ollama integration helper with priority queue.
+ *
+ * User chat requests (priority 0) always run first.
+ * Background tasks like embeddings (priority 2) yield to user requests.
+ * This prevents background scraping from starving the chat.
  */
 
 import { invokeLLM } from "./_core/llm";
+import { enqueueOllama } from "./ollamaQueue.js";
 
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const DEFAULT_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
@@ -15,28 +18,77 @@ export type OllamaMessage = {
   content: string;
 };
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── Cached state ─────────────────────────────────────────────────────────────
+let _ollamaAvailable: boolean | null = null;
+let _ollamaCheckedAt = 0;
+let _ollamaModels: string[] | null = null;
+let _ollamaModelsCheckedAt = 0;
+const OLLAMA_CACHE_TTL = 15_000;
+const OLLAMA_MODELS_CACHE_TTL = 60_000;
+
+// ── Health check (cached) ────────────────────────────────────────────────────
 export async function isOllamaAvailable(): Promise<boolean> {
+  const now = Date.now();
+  if (_ollamaAvailable !== null && now - _ollamaCheckedAt < OLLAMA_CACHE_TTL) {
+    return _ollamaAvailable;
+  }
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/tags`, { signal: AbortSignal.timeout(3000) });
-    return res.ok;
+    _ollamaAvailable = res.ok;
   } catch {
-    return false;
+    _ollamaAvailable = false;
   }
+  _ollamaCheckedAt = now;
+  return _ollamaAvailable!;
 }
 
 export async function listOllamaModels(): Promise<string[]> {
+  const now = Date.now();
+  if (_ollamaModels !== null && now - _ollamaModelsCheckedAt < OLLAMA_MODELS_CACHE_TTL) {
+    return _ollamaModels;
+  }
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/tags`, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return [];
+    if (!res.ok) { _ollamaModels = []; return []; }
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    return (data.models || []).map((m) => m.name);
+    _ollamaModels = (data.models || []).map((m) => m.name);
   } catch {
-    return [];
+    _ollamaModels = [];
   }
+  _ollamaModelsCheckedAt = now;
+  return _ollamaModels!;
 }
 
-// ── Chat completion (non-streaming) ───────────────────────────────────────────
+// ── Raw Ollama fetch (no queue, used internally) ─────────────────────────────
+async function _rawOllamaChat(
+  messages: OllamaMessage[],
+  model: string,
+  timeoutMs: number
+): Promise<string> {
+  const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages, stream: false }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`Ollama error: ${res.status}`);
+  const data = (await res.json()) as { message?: { content: string } };
+  return data.message?.content ?? "";
+}
+
+async function _rawOllamaEmbed(text: string, model: string): Promise<number[]> {
+  const res = await fetch(`${OLLAMA_BASE}/api/embed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input: text }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`Embed error: ${res.status}`);
+  const data = (await res.json()) as { embeddings?: number[][] };
+  return data.embeddings?.[0] ?? [];
+}
+
+// ── Chat completion (priority 0 — user facing) ──────────────────────────────
 export async function ollamaChat(
   messages: OllamaMessage[],
   model: string = DEFAULT_MODEL
@@ -45,15 +97,8 @@ export async function ollamaChat(
 
   if (ollamaUp) {
     try {
-      const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages, stream: false }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (!res.ok) throw new Error(`Ollama error: ${res.status}`);
-      const data = (await res.json()) as { message?: { content: string } };
-      return data.message?.content ?? "";
+      // Priority 0 = user chat, gets processed first
+      return await enqueueOllama(0, () => _rawOllamaChat(messages, model, 120_000));
     } catch (err) {
       console.warn("[Ollama] Chat failed, falling back to Forge LLM:", err);
     }
@@ -64,7 +109,22 @@ export async function ollamaChat(
   return (response as any)?.choices?.[0]?.message?.content ?? "";
 }
 
-// ── Streaming chat (returns async generator) ──────────────────────────────────
+// ── Background chat (priority 1 — memory extraction, model routing) ──────────
+export async function ollamaChatBackground(
+  messages: OllamaMessage[],
+  model: string = DEFAULT_MODEL
+): Promise<string> {
+  const ollamaUp = await isOllamaAvailable();
+  if (!ollamaUp) return "";
+
+  try {
+    return await enqueueOllama(1, () => _rawOllamaChat(messages, model, 60_000));
+  } catch {
+    return "";
+  }
+}
+
+// ── Streaming chat (not queued — runs directly for real-time UX) ─────────────
 export async function* ollamaChatStream(
   messages: OllamaMessage[],
   model: string = DEFAULT_MODEL
@@ -117,28 +177,17 @@ export async function* ollamaChatStream(
   yield text;
 }
 
-// ── Embeddings ────────────────────────────────────────────────────────────────
+// ── Embeddings (priority 2 — lowest, yields to chat) ─────────────────────────
 export async function getEmbedding(text: string, model: string = EMBED_MODEL): Promise<number[]> {
   const ollamaUp = await isOllamaAvailable();
+  if (!ollamaUp) return [];
 
-  if (ollamaUp) {
-    try {
-      const res = await fetch(`${OLLAMA_BASE}/api/embed`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, input: text }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!res.ok) throw new Error(`Embed error: ${res.status}`);
-      const data = (await res.json()) as { embeddings?: number[][] };
-      return data.embeddings?.[0] ?? [];
-    } catch (err) {
-      console.warn("[Ollama] Embedding failed:", err);
-    }
+  try {
+    return await enqueueOllama(2, () => _rawOllamaEmbed(text, model));
+  } catch (err) {
+    console.warn("[Ollama] Embedding failed:", err);
+    return [];
   }
-
-  // Return empty vector if embedding unavailable
-  return [];
 }
 
 export { DEFAULT_MODEL, EMBED_MODEL };

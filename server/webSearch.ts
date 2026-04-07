@@ -14,39 +14,58 @@ import { logger } from "./logger.js";
 // ── DuckDuckGo Search (Free, No API Key) ───────────────────────────────────
 export async function searchDuckDuckGo(
   query: string,
-  maxResults = 5
+  maxResults = 10
 ): Promise<Array<{ title: string; url: string; snippet: string }>> {
   await logger.info("webSearch", `Searching DuckDuckGo: ${query}`);
 
   try {
-    // Use DuckDuckGo Instant Answer API
+    // Use DuckDuckGo HTML search and parse results
     const response = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        },
+        signal: AbortSignal.timeout(10_000),
+      }
     );
 
-    const data = await response.json();
+    const html = await response.text();
     const results: Array<{ title: string; url: string; snippet: string }> = [];
 
-    // Extract results from RelatedTopics
-    if (data.RelatedTopics) {
-      for (const topic of data.RelatedTopics.slice(0, maxResults)) {
-        if (topic.Text && topic.FirstURL) {
-          results.push({
-            title: topic.Text.split(" - ")[0] || "No title",
-            url: topic.FirstURL,
-            snippet: topic.Text,
-          });
-        }
+    // Parse result blocks: <a class="result__a" href="...">Title</a>
+    const resultBlocks = html.match(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi) || [];
+
+    for (const block of resultBlocks.slice(0, maxResults)) {
+      // Extract href
+      const hrefMatch = block.match(/href="([^"]*)"/);
+      // Extract title text (strip tags)
+      const titleText = block.replace(/<[^>]+>/g, "").trim();
+
+      if (!hrefMatch?.[1] || !titleText) continue;
+
+      let url = hrefMatch[1];
+      // DuckDuckGo wraps URLs in a redirect — extract the actual URL
+      const uddgMatch = url.match(/uddg=([^&]*)/);
+      if (uddgMatch) {
+        url = decodeURIComponent(uddgMatch[1]);
       }
+
+      // Skip non-http URLs
+      if (!url.startsWith("http")) continue;
+
+      results.push({
+        title: titleText,
+        url,
+        snippet: titleText, // DuckDuckGo HTML doesn't easily give snippets
+      });
     }
 
-    // If no results, use abstract
-    if (results.length === 0 && data.Abstract) {
-      results.push({
-        title: data.Heading || query,
-        url: data.AbstractURL || "",
-        snippet: data.Abstract,
-      });
+    // Also try to extract snippets from result__snippet divs
+    const snippetBlocks = html.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi) || [];
+    for (let i = 0; i < Math.min(snippetBlocks.length, results.length); i++) {
+      const text = snippetBlocks[i].replace(/<[^>]+>/g, "").trim();
+      if (text) results[i].snippet = text;
     }
 
     return results;

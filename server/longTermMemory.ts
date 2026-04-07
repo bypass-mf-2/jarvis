@@ -6,7 +6,7 @@
  */
 
 import * as fs from "fs";
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 
 interface Memory {
   fact: string;

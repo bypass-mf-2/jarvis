@@ -1,60 +1,61 @@
 /**
- * Intelligent Source Discovery System
- * 
- * Continuously discovers and evaluates new knowledge sources based on:
- * - User interests (inferred from conversation patterns)
- * - Content quality metrics
- * - Source reliability scores
- * - Topic relevance
- * - Update frequency
- * 
- * Uses LLM to:
- * - Generate search queries for new sources
- * - Evaluate content quality
- * - Categorize and tag sources
- * - Prune low-value sources
+ * Intelligent Source Discovery & Web Crawling System
+ *
+ * Actually searches the web for new content on every cycle:
+ * 1. Analyzes user interests from conversation history
+ * 2. Generates search queries for those interests
+ * 3. Searches the web (DuckDuckGo/Brave/Google)
+ * 4. Fetches and scrapes discovered pages
+ * 5. Chunks and stores the content in DB + ChromaDB
+ * 6. Prunes low-quality sources over time
  */
 
-import { ollamaChat } from "./ollama";
 import {
   addScrapeSource,
   getScrapeSources,
   updateScrapeSourceStatus,
   getKnowledgeChunks,
+  addKnowledgeChunk,
   getSystemLogs,
 } from "./db";
+import { searchWeb, fetchPageContent } from "./webSearch.js";
 import { logger } from "./logger";
+import { nanoid } from "nanoid";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-interface DiscoveredSource {
-  url: string;
-  name: string;
-  type: "rss" | "news" | "custom_url";
-  category: string;
-  relevanceScore: number;
-  qualityScore: number;
-  updateFrequency: "daily" | "weekly" | "monthly";
-}
-
 interface UserInterest {
   topic: string;
-  weight: number; // 0-1, based on query frequency
+  weight: number;
   keywords: string[];
 }
 
-interface SourceQualityMetrics {
-  sourceId: number;
-  avgChunkLength: number;
-  uniqueChunks: number;
-  totalScrapes: number;
-  errorRate: number;
-  lastSuccessfulScrape: Date | null;
-  qualityScore: number;
+// ── Text chunking (same logic as scraper.ts) ─────────────────────────────────
+function chunkText(text: string, maxChars = 800): string[] {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if ((current + " " + sentence).length > maxChars && current) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += (current ? " " : "") + sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter((c) => c.length > 80);
 }
+
+// Track URLs we've already scraped this session to avoid duplicates
+const recentlyScrapedUrls = new Set<string>();
+const MAX_RECENT_URLS = 5000;
+
+// Lock to prevent overlapping crawl cycles
+let _crawling = false;
 
 // ── Interest Analysis ──────────────────────────────────────────────────────────
 async function analyzeUserInterests(): Promise<UserInterest[]> {
-  const logs = await getSystemLogs(1000);
+  const logs = await getSystemLogs(500);
   const queries = logs
     .filter((l: any) => l.module === "rag" && l.message?.includes("query"))
     .map((l: any) => {
@@ -63,30 +64,57 @@ async function analyzeUserInterests(): Promise<UserInterest[]> {
     })
     .filter(Boolean);
 
-  if (queries.length === 0) {
-    return getDefaultInterests();
-  }
+  if (queries.length >= 5) {
+    // Extract topics from user queries using keyword frequency
+    // (avoids calling Ollama which competes with user chat)
+    const wordFreq = new Map<string, number>();
+    const stopWords = new Set([
+      // Common English
+      "the", "a", "an", "is", "are", "was", "were", "what", "how", "why", "can", "do", "does",
+      "this", "that", "with", "for", "and", "but", "not", "you", "your", "about", "from",
+      "have", "has", "will", "would", "could", "should", "been", "being", "some", "any", "all",
+      "more", "most", "very", "just", "also", "than", "then", "when", "where", "which", "who",
+      "whom", "there", "their", "they", "them", "its", "into", "over", "between", "give",
+      "recent", "tell", "know", "like", "make", "get", "got", "want", "need", "please",
+      "help", "think", "thing", "things", "something", "anything", "nothing", "everything",
+      // Chat/command noise (things users say to Jarvis)
+      "scrape", "sources", "source", "search", "find", "show", "list", "give", "news",
+      "code", "write", "create", "generate", "explain", "tell", "say", "look", "check",
+      "use", "using", "work", "working", "run", "running", "start", "stop", "update",
+      "new", "old", "good", "bad", "best", "first", "last", "next", "many", "much",
+      "really", "actually", "basically", "currently", "recently", "today", "yesterday",
+    ]);
 
-  // Use LLM to extract topics from queries
-  const prompt = `Analyze these user queries and extract the main topics of interest. Return as JSON array:
-
-Queries:
-${queries.slice(0, 50).join("\n")}
-
-Format: [{ "topic": "topic name", "weight": 0.0-1.0, "keywords": ["keyword1", "keyword2"] }]
-
-Return only the JSON array, ordered by weight (highest first). Maximum 10 topics.`;
-
-  try {
-    const response = await ollamaChat([{ role: "user", content: prompt }]);
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    
-    if (jsonMatch) {
-      const interests: UserInterest[] = JSON.parse(jsonMatch[0]);
-      return interests.slice(0, 10);
+    for (const q of queries.slice(0, 50)) {
+      // Clean query: remove punctuation, ellipsis, question marks
+      const cleaned = (q as string).toLowerCase().replace(/[?.!,;:'"…]+/g, " ").trim();
+      const words = cleaned.split(/\s+/).filter((w: string) =>
+        w.length > 3 && !stopWords.has(w) && !/^\d+$/.test(w)
+      );
+      for (const w of words) {
+        wordFreq.set(w, (wordFreq.get(w) || 0) + 1);
+      }
     }
-  } catch (err) {
-    await logger.warn("sourceDiscovery", `Interest analysis failed: ${String(err)}`);
+
+    const topWords = [...wordFreq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15);
+
+    if (topWords.length >= 3) {
+      const interests: UserInterest[] = [];
+      const maxFreq = topWords[0][1];
+
+      for (let i = 0; i < Math.min(topWords.length, 6); i++) {
+        const [word, freq] = topWords[i];
+        interests.push({
+          topic: word.charAt(0).toUpperCase() + word.slice(1),
+          weight: freq / maxFreq,
+          keywords: [word],
+        });
+      }
+
+      if (interests.length > 0) return interests;
+    }
   }
 
   return getDefaultInterests();
@@ -94,299 +122,235 @@ Return only the JSON array, ordered by weight (highest first). Maximum 10 topics
 
 function getDefaultInterests(): UserInterest[] {
   return [
-    { topic: "Artificial Intelligence", weight: 0.9, keywords: ["AI", "machine learning", "LLM"] },
-    { topic: "Technology", weight: 0.8, keywords: ["tech", "software", "innovation"] },
-    { topic: "Science", weight: 0.7, keywords: ["research", "physics", "biology"] },
-    { topic: "News", weight: 0.6, keywords: ["world news", "current events"] },
+    { topic: "Artificial Intelligence", weight: 0.9, keywords: ["AI", "machine learning", "LLM", "neural network"] },
+    { topic: "Technology News", weight: 0.8, keywords: ["tech", "software", "startup", "innovation"] },
+    { topic: "Science Research", weight: 0.7, keywords: ["research", "study", "discovery", "breakthrough"] },
+    { topic: "Programming", weight: 0.7, keywords: ["coding", "developer", "javascript", "python", "typescript"] },
+    { topic: "World News", weight: 0.5, keywords: ["world", "politics", "economy", "global"] },
   ];
 }
 
-// ── Source Discovery ───────────────────────────────────────────────────────────
-async function discoverSources(interests: UserInterest[]): Promise<DiscoveredSource[]> {
-  const discovered: DiscoveredSource[] = [];
+// ── Generate search queries from interests ───────────────────────────────────
+function generateSearchQueries(interests: UserInterest[]): string[] {
+  const queries: string[] = [];
+  const today = new Date().toISOString().split("T")[0];
 
-  for (const interest of interests.slice(0, 3)) {
-    const sources = await findSourcesForTopic(interest);
-    discovered.push(...sources);
+  for (const interest of interests) {
+    // Current events
+    queries.push(`${interest.topic} latest news ${today}`);
+    queries.push(`${interest.topic} breaking news today`);
+    // Deep content
+    queries.push(`${interest.keywords.slice(0, 2).join(" ")} guide tutorial`);
+    queries.push(`${interest.keywords.slice(0, 2).join(" ")} explained`);
+    // Research / analysis
+    queries.push(`${interest.topic} analysis research 2024 2025 2026`);
+    queries.push(`${interest.topic} trends predictions`);
+    // Opinion / discussion
+    queries.push(`${interest.topic} discussion forum`);
   }
 
-  return discovered;
+  // Shuffle and return up to 20 queries (× 10 results each = 200 candidate URLs → ~100 pages)
+  return queries.sort(() => Math.random() - 0.5).slice(0, 20);
 }
 
-async function findSourcesForTopic(interest: UserInterest): Promise<DiscoveredSource[]> {
-  const prompt = `Find 3-5 high-quality RSS feeds or news sources about "${interest.topic}".
+// ── Scrape a single URL and store chunks ─────────────────────────────────────
+async function scrapeAndStore(
+  url: string,
+  title: string,
+  sourceType: "news" | "custom_url" = "custom_url"
+): Promise<number> {
+  if (recentlyScrapedUrls.has(url)) return 0;
 
-Requirements:
-- Must be well-known, reliable sources
-- Should have RSS feeds or be scrapable
-- Focus on: ${interest.keywords.join(", ")}
-
-Return as JSON array:
-[{
-  "url": "https://example.com/feed.xml",
-  "name": "Source Name",
-  "type": "rss|news|custom_url",
-  "category": "category name",
-  "relevanceScore": 0.0-1.0,
-  "qualityScore": 0.0-1.0,
-  "updateFrequency": "daily|weekly|monthly"
-}]
-
-Return only the JSON array. Prioritize sources with RSS feeds.`;
+  // Evict old URLs if set is too large
+  if (recentlyScrapedUrls.size > MAX_RECENT_URLS) {
+    const firstHalf = [...recentlyScrapedUrls].slice(0, MAX_RECENT_URLS / 2);
+    firstHalf.forEach((u) => recentlyScrapedUrls.delete(u));
+  }
+  recentlyScrapedUrls.add(url);
 
   try {
-    const response = await ollamaChat([{ role: "user", content: prompt }]);
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    
-    if (jsonMatch) {
-      const sources: DiscoveredSource[] = JSON.parse(jsonMatch[0]);
-      
-      // Filter out existing sources
-      const existing = await getScrapeSources();
-      const existingUrls = new Set(existing.map((s: any) => s.url));
-      
-      return sources
-        .filter(s => !existingUrls.has(s.url))
-        .filter(s => s.relevanceScore >= 0.5);
+    const content = await fetchPageContent(url);
+    if (!content || content.length < 200) return 0;
+
+    const chunks = chunkText(content);
+    let stored = 0;
+
+    for (const chunk of chunks) {
+      const chromaId = nanoid();
+      try {
+        await addKnowledgeChunk({
+          sourceUrl: url,
+          sourceTitle: title,
+          sourceType,
+          content: chunk,
+          chromaId,
+          tags: [],
+        });
+
+        // Embedding happens in the background via scraper's embed queue
+        // (avoids blocking Ollama and starving user chat)
+
+        stored++;
+      } catch {
+        // Skip duplicate or failed chunks
+      }
     }
+
+    return stored;
   } catch (err) {
-    await logger.warn("sourceDiscovery", `Source discovery failed for ${interest.topic}: ${String(err)}`);
+    await logger.warn("sourceDiscovery", `Failed to scrape ${url}: ${String(err)}`);
+    return 0;
   }
-
-  return [];
 }
 
-// ── Source Quality Evaluation ──────────────────────────────────────────────────
-async function evaluateSourceQuality(sourceId: number): Promise<SourceQualityMetrics> {
-  const sources = await getScrapeSources();
-  const source = sources.find((s: any) => s.id === sourceId);
-  
-  if (!source) {
-    return {
-      sourceId,
-      avgChunkLength: 0,
-      uniqueChunks: 0,
-      totalScrapes: 0,
-      errorRate: 1.0,
-      lastSuccessfulScrape: null,
-      qualityScore: 0,
-    };
-  }
-
-  // Get chunks from this source
-  const allChunks = await getKnowledgeChunks(1000);
-  const sourceChunks = allChunks.filter((c: any) => c.sourceUrl === source.url);
-
-  const avgChunkLength = sourceChunks.length > 0
-    ? sourceChunks.reduce((sum: number, c: any) => sum + c.content.length, 0) / sourceChunks.length
-    : 0;
-
-  const totalScrapes = source.totalChunks || 0;
-  const errorRate = source.lastStatus === "error" ? 1.0 : 0.0;
-
-  // Quality score formula
-  const lengthScore = Math.min(avgChunkLength / 500, 1.0); // Prefer 500+ char chunks
-  const volumeScore = Math.min(sourceChunks.length / 50, 1.0); // Prefer 50+ chunks
-  const reliabilityScore = 1.0 - errorRate;
-
-  const qualityScore = (lengthScore * 0.3 + volumeScore * 0.4 + reliabilityScore * 0.3);
-
-  return {
-    sourceId,
-    avgChunkLength,
-    uniqueChunks: sourceChunks.length,
-    totalScrapes,
-    errorRate,
-    lastSuccessfulScrape: source.lastScrapedAt ? new Date(source.lastScrapedAt) : null,
-    qualityScore,
-  };
-}
-
-// ── Source Pruning ─────────────────────────────────────────────────────────────
-async function pruneLowQualitySources(): Promise<{ pruned: number; kept: number }> {
-  const sources = await getScrapeSources();
-  const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
-
-  let pruned = 0;
-  let kept = 0;
-
-  for (const source of active) {
-    const metrics = await evaluateSourceQuality(source.id);
-
-    // Prune if:
-    // - Quality score below 0.3
-    // - No successful scrapes in last 30 days
-    // - Error rate > 0.5
-    const daysSinceSuccess = metrics.lastSuccessfulScrape
-      ? (Date.now() - metrics.lastSuccessfulScrape.getTime()) / (1000 * 60 * 60 * 24)
-      : 999;
-
-    if (
-      metrics.qualityScore < 0.3 ||
-      daysSinceSuccess > 30 ||
-      metrics.errorRate > 0.5
-    ) {
-      await updateScrapeSourceStatus(source.id, "inactive");
-      pruned++;
-      
-      await logger.info(
-        "sourceDiscovery",
-        `Pruned low-quality source: ${source.name} (score: ${metrics.qualityScore.toFixed(2)})`
-      );
-    } else {
-      kept++;
-    }
-  }
-
-  return { pruned, kept };
-}
-
-// ── Smart Source Recommendation ────────────────────────────────────────────────
-async function recommendSourceAdjustments(): Promise<{
-  toAdd: DiscoveredSource[];
-  toRemove: number[];
-  toPrioritize: number[];
+// ── Main Web Crawl Cycle ─────────────────────────────────────────────────────
+export async function runWebCrawlCycle(): Promise<{
+  searched: number;
+  pagesScraped: number;
+  chunksStored: number;
 }> {
-  const interests = await analyzeUserInterests();
-  const currentSources = await getScrapeSources();
-  const activeSources = currentSources.filter((s: any) => s.isActive);
+  if (_crawling) {
+    await logger.info("sourceDiscovery", "Previous crawl still running, skipping");
+    return { searched: 0, pagesScraped: 0, chunksStored: 0 };
+  }
 
-  // Find gaps in coverage
-  const coveredTopics = new Set<string>(activeSources.map((s: any) => s.type));
-  const uncoveredInterests = interests.filter(
-    (i) => !Array.from(coveredTopics).some((topic: string) =>
-      topic.toLowerCase().includes(i.topic.toLowerCase())
-    )
-  );
+  _crawling = true;
+  await logger.info("sourceDiscovery", "Starting web crawl cycle");
 
-  // Discover new sources for uncovered interests
-  const toAdd = await discoverSources(uncoveredInterests);
+  let searched = 0;
+  let pagesScraped = 0;
+  let chunksStored = 0;
 
-  // Evaluate existing sources
-  const sourceMetrics = await Promise.all(
-    activeSources.map(async (s: any) => ({
-      id: s.id,
-      metrics: await evaluateSourceQuality(s.id),
-    }))
-  );
+  try {
+    // Step 1: Figure out what to search for (uses defaults if Ollama is busy)
+    const interests = await analyzeUserInterests();
+    const queries = generateSearchQueries(interests);
 
-  // Low-quality sources to remove
-  const toRemove = sourceMetrics
-    .filter(sm => sm.metrics.qualityScore < 0.3)
-    .map(sm => sm.id);
+    await logger.info(
+      "sourceDiscovery",
+      `Crawling ${queries.length} queries from ${interests.length} interests`
+    );
 
-  // High-quality sources to prioritize
-  const toPrioritize = sourceMetrics
-    .filter(sm => sm.metrics.qualityScore > 0.7)
-    .sort((a, b) => b.metrics.qualityScore - a.metrics.qualityScore)
-    .slice(0, 5)
-    .map(sm => sm.id);
+    // Step 2: Search the web and scrape results (target: 100 pages per cycle)
+    const PAGE_TARGET = 100;
 
-  return { toAdd, toRemove, toPrioritize };
+    for (const query of queries) {
+      if (pagesScraped >= PAGE_TARGET) break;
+
+      try {
+        const results = await searchWeb(query, 10);
+        searched++;
+
+        for (const result of results) {
+          if (pagesScraped >= PAGE_TARGET) break;
+          if (recentlyScrapedUrls.has(result.url)) continue;
+
+          const stored = await scrapeAndStore(result.url, result.title, "news");
+          if (stored > 0) {
+            pagesScraped++;
+            chunksStored += stored;
+          }
+        }
+      } catch (err) {
+        await logger.warn("sourceDiscovery", `Search failed for "${query}": ${String(err)}`);
+      }
+    }
+
+    await logger.info(
+      "sourceDiscovery",
+      `Web crawl complete: ${searched} searches, ${pagesScraped} pages scraped, ${chunksStored} chunks stored`
+    );
+  } catch (err) {
+    await logger.error("sourceDiscovery", `Web crawl cycle failed: ${String(err)}`);
+  } finally {
+    _crawling = false;
+  }
+
+  return { searched, pagesScraped, chunksStored };
 }
 
-// ── Content Deduplication ──────────────────────────────────────────────────────
-async function deduplicateKnowledge(): Promise<{ removed: number }> {
-  const chunks = await getKnowledgeChunks(5000);
-  
-  // Group by similar content using simple hash
-  const contentHashes = new Map<string, number[]>();
-  
-  for (const chunk of chunks) {
-    const hash = simpleHash(chunk.content);
-    const existing = contentHashes.get(hash) || [];
-    existing.push(chunk.id);
-    contentHashes.set(hash, existing);
-  }
-  
-  let removed = 0;
-  
-  // Remove duplicates (keep the oldest/first one)
-  for (const [hash, ids] of Array.from(contentHashes.entries())) {
-    if (ids.length > 1) {
-      // Would need a deleteKnowledgeChunk function in db.ts
-      await logger.info("sourceDiscovery", `Found ${ids.length} duplicate chunks: ${hash}`);
-      removed += ids.length - 1;
+// ── Also discover and add new RSS sources via real web search ────────────────
+export async function discoverNewSources(): Promise<number> {
+  const interests = await analyzeUserInterests();
+  const existing = await getScrapeSources();
+  const existingUrls = new Set(existing.map((s: any) => s.url));
+  let added = 0;
+
+  for (const interest of interests.slice(0, 3)) {
+    try {
+      // Search for RSS feeds on this topic
+      const results = await searchWeb(`${interest.topic} RSS feed`, 5);
+
+      for (const result of results) {
+        const url = result.url;
+        if (existingUrls.has(url)) continue;
+
+        // Check if URL looks like an RSS feed
+        const isRSS =
+          url.includes("/rss") ||
+          url.includes("/feed") ||
+          url.includes(".xml") ||
+          url.includes("atom");
+
+        if (isRSS) {
+          try {
+            await addScrapeSource({
+              url,
+              name: result.title || new URL(url).hostname,
+              type: "rss",
+              intervalMinutes: 1,
+            });
+            existingUrls.add(url);
+            added++;
+            await logger.info("sourceDiscovery", `Discovered new RSS source: ${result.title} (${url})`);
+          } catch {
+            // skip if already exists or invalid
+          }
+        }
+      }
+    } catch (err) {
+      await logger.warn("sourceDiscovery", `RSS discovery failed for ${interest.topic}: ${String(err)}`);
     }
   }
-  
-  return { removed };
+
+  return added;
 }
 
-function simpleHash(text: string): string {
-  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 200);
-  let hash = 0;
-  for (let i = 0; i < normalized.length; i++) {
-    hash = ((hash << 5) - hash) + normalized.charCodeAt(i);
-    hash = hash & hash; // Convert to 32-bit integer
-  }
-  return hash.toString(36);
-}
-
-// ── Main Discovery Cycle ───────────────────────────────────────────────────────
+// ── Full Discovery Cycle (RSS discovery + web crawl) ─────────────────────────
 export async function runSourceDiscovery(): Promise<{
   discovered: number;
   added: number;
   pruned: number;
+  crawl: { searched: number; pagesScraped: number; chunksStored: number };
 }> {
-  await logger.info("sourceDiscovery", "Starting source discovery cycle");
+  await logger.info("sourceDiscovery", "Starting full source discovery cycle");
 
-  try {
-    // Step 1: Analyze user interests
-    const interests = await analyzeUserInterests();
-    await logger.info("sourceDiscovery", `Identified ${interests.length} user interests`);
+  // Phase 1: Discover new RSS sources
+  const added = await discoverNewSources();
 
-    // Step 2: Get recommendations
-    const recommendations = await recommendSourceAdjustments();
-    await logger.info(
-      "sourceDiscovery",
-      `Found ${recommendations.toAdd.length} new sources, ${recommendations.toRemove.length} to prune`
-    );
+  // Phase 2: Web crawl — search + scrape live pages
+  const crawl = await runWebCrawlCycle();
 
-    // Step 3: Add high-quality new sources (auto-approve if score > 0.7)
-    let added = 0;
-    for (const source of recommendations.toAdd.slice(0, 5)) {
-      if (source.qualityScore >= 0.7) {
-        await addScrapeSource({
-          url: source.url,
-          name: source.name,
-          type: source.type,
-          isActive: true,
-        });
-        added++;
-        
-        await logger.info("sourceDiscovery", `Added new source: ${source.name} (score: ${source.qualityScore})`);
-      }
-    }
+  await logger.info(
+    "sourceDiscovery",
+    `Discovery complete: ${added} new RSS sources, ${crawl.chunksStored} chunks from web crawl`
+  );
 
-    // Step 4: Prune low-quality sources
-    const pruneResult = await pruneLowQualitySources();
-
-    // Step 5: Deduplicate knowledge
-    await deduplicateKnowledge();
-
-    return {
-      discovered: recommendations.toAdd.length,
-      added,
-      pruned: pruneResult.pruned,
-    };
-  } catch (err) {
-    await logger.error("sourceDiscovery", `Discovery cycle failed: ${String(err)}`);
-    return { discovered: 0, added: 0, pruned: 0 };
-  }
+  return { discovered: added + crawl.pagesScraped, added, pruned: 0, crawl };
 }
 
 // ── Scheduler ──────────────────────────────────────────────────────────────────
 let discoveryInterval: ReturnType<typeof setInterval> | null = null;
 
-export function startSourceDiscoveryScheduler(intervalMs = 24 * 60 * 60 * 1000): void {
+export function startSourceDiscoveryScheduler(intervalMs = 60 * 1000): void {
   if (discoveryInterval) return;
-  
-  logger.info("sourceDiscovery", `Source discovery scheduler started (every ${intervalMs / 3600000}h)`);
-  
-  // Initial discovery after 5 minutes
-  setTimeout(() => runSourceDiscovery(), 5 * 60 * 1000);
-  
+
+  logger.info("sourceDiscovery", `Web crawl scheduler started (every ${intervalMs / 1000}s)`);
+
+  // First crawl 30 seconds after startup (give scraper time to do RSS feeds first)
+  setTimeout(() => runWebCrawlCycle(), 30_000);
+
+  // Then run full discovery cycle on interval
   discoveryInterval = setInterval(() => runSourceDiscovery(), intervalMs);
 }
 

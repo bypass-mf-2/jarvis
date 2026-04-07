@@ -6,7 +6,7 @@
  */
 
 import { db, getMessagesByRole } from "./db.js";
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 import { logger } from "./logger.js";
 import * as fs from "fs";
 import * as path from "path";

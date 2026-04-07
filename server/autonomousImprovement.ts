@@ -20,7 +20,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { ollamaChat } from "./ollama";
+import { ollamaChatBackground as ollamaChat } from "./ollama";
 import { 
   getRecentErrorLogs, 
   getSystemLogs, 

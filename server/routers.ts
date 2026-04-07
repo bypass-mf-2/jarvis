@@ -55,10 +55,11 @@ import {
   recallEntities,
 } from "./persistentMemory.js";
 import { generateImage } from "./imageGeneration.js";
-import { cloneTrevorsVoice } from "./voicecloning.js";
+import { cloneTrevorsVoice, cloneVoiceElevenLabs } from "./voicecloning.js";
 import { executeCode, testCode } from "./codeExecution.js";
 import { generateCode, reviewCode, explainCode, fixCode } from "./codingAI.js";
 import { searchWeb, searchAndSummarize } from "./webSearch.js";
+import { runWebCrawlCycle, runSourceDiscovery } from "./sourceDiscovery.js";
 import {
   collectTrainingExample,
   exportTrainingData,
@@ -250,6 +251,14 @@ const scraperRouter = router({
   seedSources: publicProcedure.mutation(async () => {
     return seedDefaultSources();
   }),
+
+  webCrawl: publicProcedure.mutation(async () => {
+    return runWebCrawlCycle();
+  }),
+
+  discoverSources: publicProcedure.mutation(async () => {
+    return runSourceDiscovery();
+  }),
 });
 
 // ── Self-Improvement Router ───────────────────────────────────────────────────
@@ -331,6 +340,50 @@ const voiceRouter = router({
     .mutation(async ({ input }) => {
       return await writeInTrevorsVoice(input.topic, input.length, input.type);
     }),
+
+  testVoice: publicProcedure
+    .input(z.object({
+      voiceId: z.string(),
+      text: z.string(),
+      stability: z.number(),
+      similarityBoost: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      const path = await import("path");
+      const filepath = await cloneVoiceElevenLabs(input.text, input.voiceId);
+      return { audioUrl: `/api/audio/${path.basename(filepath)}` };
+    }),
+});
+
+// ── Settings Router ──────────────────────────────────────────────────────────
+const settingsRouter = router({
+  saveVoiceSettings: publicProcedure
+    .input(z.object({
+      voiceId: z.string(),
+      stability: z.number(),
+      similarityBoost: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      const fs = await import("fs");
+      const path = await import("path");
+      const configPath = path.join(process.cwd(), "voice-config.json");
+      fs.writeFileSync(configPath, JSON.stringify(input, null, 2));
+      return { success: true };
+    }),
+
+  getVoiceSettings: publicProcedure.query(async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const configPath = path.join(process.cwd(), "voice-config.json");
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    }
+    return {
+      voiceId: "21m00Tcm4TlvDq8ikWAM",
+      stability: 0.5,
+      similarityBoost: 0.75,
+    };
+  }),
 });
 
 // ── Memory Router ─────────────────────────────────────────────────────────────
@@ -569,6 +622,7 @@ export const appRouter = router({
   image: imageRouter,
   code: codeRouter,
   search: searchRouter,
+  settings: settingsRouter,
 });
 
 export type AppRouter = typeof appRouter;

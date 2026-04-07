@@ -10,7 +10,7 @@
  * SURVIVES RESTARTS - Everything stored in database
  */
 
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 import {
   getMessages,
   getConversations,

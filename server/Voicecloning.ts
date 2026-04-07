@@ -19,6 +19,17 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 }
 
 // ── ElevenLabs Voice Cloning ───────────────────────────────────────────────
+// Load saved voice config from disk
+function loadVoiceConfig(): { voiceId: string; stability: number; similarityBoost: number } {
+  try {
+    const configPath = path.join(process.cwd(), "voice-config.json");
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    }
+  } catch {}
+  return { voiceId: "21m00Tcm4TlvDq8ikWAM", stability: 0.5, similarityBoost: 0.75 };
+}
+
 export async function cloneVoiceElevenLabs(
   text: string,
   voiceId?: string // Custom voice ID if you've cloned your voice
@@ -30,8 +41,9 @@ export async function cloneVoiceElevenLabs(
     throw new Error("ELEVENLABS_API_KEY not set");
   }
 
-  // Use Trevor's cloned voice ID, or default to a preset voice
-  const voice = voiceId || process.env.TREVOR_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // Default: Rachel
+  // Use provided voiceId, or saved config, or env var, or default
+  const savedConfig = loadVoiceConfig();
+  const voice = voiceId || process.env.TREVOR_VOICE_ID || savedConfig.voiceId;
 
   try {
     const response = await fetch(
@@ -47,8 +59,8 @@ export async function cloneVoiceElevenLabs(
           text,
           model_id: "eleven_monolingual_v1",
           voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
+            stability: savedConfig.stability,
+            similarity_boost: savedConfig.similarityBoost,
           },
         }),
       }

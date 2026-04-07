@@ -11,26 +11,49 @@ import { logger } from "./logger";
 const CHROMA_BASE = process.env.CHROMA_BASE_URL || "http://localhost:8000";
 const COLLECTION_NAME = "jarvis_knowledge";
 
+// ── Cached state (avoids repeated HTTP calls per chunk) ──────────────────────
+let _chromaAvailable: boolean | null = null;
+let _chromaCheckedAt = 0;
+const CHROMA_CACHE_TTL = 30_000; // recheck every 30s
+
+let _collectionId: string | null = null;
+let _collectionEnsured = false;
+let _chromaUnavailableLogged = false;
+
 // ── ChromaDB availability ─────────────────────────────────────────────────────
 async function isChromaAvailable(): Promise<boolean> {
+  const now = Date.now();
+  if (_chromaAvailable !== null && now - _chromaCheckedAt < CHROMA_CACHE_TTL) {
+    return _chromaAvailable;
+  }
   try {
     const res = await fetch(`${CHROMA_BASE}/api/v2/heartbeat`, {
       signal: AbortSignal.timeout(2000),
     });
-    return res.ok;
+    _chromaAvailable = res.ok;
   } catch {
-    return false;
+    _chromaAvailable = false;
+    _collectionId = null;
+    _collectionEnsured = false;
   }
+  _chromaCheckedAt = now;
+  return _chromaAvailable!;
 }
 
-// ── Ensure collection exists ──────────────────────────────────────────────────
+// ── Ensure collection exists (cached) ────────────────────────────────────────
 async function ensureCollection(): Promise<boolean> {
+  if (_collectionEnsured && _collectionId) return true;
   try {
     const getRes = await fetch(
       `${CHROMA_BASE}/api/v2/tenants/default_tenant/databases/default_database/collections/${COLLECTION_NAME}`,
       { signal: AbortSignal.timeout(5000) }
     );
-    if (getRes.ok) return true;
+    if (getRes.ok) {
+      const data = (await getRes.json()) as { id?: string };
+      _collectionId = data.id ?? null;
+      _collectionEnsured = true;
+      return true;
+    }
 
     const createRes = await fetch(
       `${CHROMA_BASE}/api/v2/tenants/default_tenant/databases/default_database/collections`,
@@ -44,6 +67,11 @@ async function ensureCollection(): Promise<boolean> {
         signal: AbortSignal.timeout(5000),
       }
     );
+    if (createRes.ok) {
+      const data = (await createRes.json()) as { id?: string };
+      _collectionId = data.id ?? null;
+      _collectionEnsured = true;
+    }
     return createRes.ok;
   } catch {
     return false;
@@ -51,6 +79,7 @@ async function ensureCollection(): Promise<boolean> {
 }
 
 async function getCollectionId(): Promise<string | null> {
+  if (_collectionId) return _collectionId;
   try {
     const res = await fetch(
       `${CHROMA_BASE}/api/v2/tenants/default_tenant/databases/default_database/collections/${COLLECTION_NAME}`,
@@ -58,7 +87,8 @@ async function getCollectionId(): Promise<string | null> {
     );
     if (!res.ok) return null;
     const data = (await res.json()) as { id?: string };
-    return data.id ?? null;
+    _collectionId = data.id ?? null;
+    return _collectionId;
   } catch {
     return null;
   }
@@ -72,9 +102,13 @@ export async function addToVectorStore(
 ): Promise<boolean> {
   const chromaUp = await isChromaAvailable();
   if (!chromaUp) {
-    await logger.warn("vectorStore", "ChromaDB unavailable, skipping vector embedding");
+    if (!_chromaUnavailableLogged) {
+      _chromaUnavailableLogged = true;
+      await logger.warn("vectorStore", "ChromaDB unavailable — skipping vector embeddings until it comes back");
+    }
     return false;
   }
+  _chromaUnavailableLogged = false;
 
   try {
     await ensureCollection();
@@ -103,6 +137,10 @@ export async function addToVectorStore(
     );
     return res.ok;
   } catch (err) {
+    // Reset cache so next call rechecks
+    _chromaAvailable = null;
+    _collectionId = null;
+    _collectionEnsured = false;
     await logger.error("vectorStore", "Failed to add document", { error: String(err) });
     return false;
   }

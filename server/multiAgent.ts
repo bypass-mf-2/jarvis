@@ -13,7 +13,7 @@
  * All agents can work simultaneously on complex tasks
  */
 
-import { ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat } from "./ollama.js";
 import { logger } from "./logger.js";
 import { searchWeb } from "./webSearch.js";
 import { generateCode, reviewCode } from "./codingAI.js";
