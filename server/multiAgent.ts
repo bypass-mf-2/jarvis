@@ -701,3 +701,56 @@ export function getAgentStatus(): {
     topPerformers,
   };
 }
+
+// ── Main Entry Point (used by router) ────────────────────────────────────────
+export async function processWithAgentSwarm(query: string): Promise<any> {
+  await logger.info("multiAgent", `Processing query with agent swarm: ${query.slice(0, 50)}...`);
+
+  const tasks = await decomposeQuery(query);
+
+  // Assign and execute
+  const results: Array<{ agent: Agent; task: Task; result: any }> = [];
+  const promises: Promise<void>[] = [];
+
+  for (const task of tasks) {
+    const agent = assignTask(task);
+    if (!agent) continue;
+
+    promises.push(
+      executeTask(task, agent).then((result) => {
+        results.push({ agent, task, result });
+      }).catch(async (err) => {
+        task.status = "failed";
+        task.result = { error: String(err) };
+        agent.status = "idle";
+        agent.currentTask = null;
+      })
+    );
+  }
+
+  await Promise.all(promises);
+
+  const successfulResults = results.filter(r => r.task.status === "complete");
+
+  if (successfulResults.length === 0) {
+    return { success: false, message: "No tasks completed successfully" };
+  }
+
+  if (successfulResults.length === 1) {
+    return { success: true, result: successfulResults[0].result, tasks };
+  }
+
+  // Synthesize
+  const synthPrompt = `Synthesize these agent results into a coherent response:\n\n` +
+    successfulResults.map((r, i) => `Result ${i + 1} (${r.task.type}): ${JSON.stringify(r.result)}`).join("\n\n") +
+    `\n\nProvide a unified, comprehensive answer.`;
+
+  const synthesis = await ollamaChat([{ role: "user", content: synthPrompt }], "llama3.1:70b");
+
+  return {
+    success: true,
+    synthesis,
+    individualResults: successfulResults.map(r => ({ type: r.task.type, result: r.result })),
+    tasks,
+  };
+}

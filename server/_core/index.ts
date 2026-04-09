@@ -8,7 +8,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import uploadRoutes from "../uploadRoutes.js";
-import { initializeServices } from "../services";
+import { startBackgroundServices } from "../services";
 import { initializeSQLiteDatabase } from "../sqlite-init";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -73,7 +73,7 @@ async function startServer() {
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
     // Start background services after server is ready
-    initializeServices().catch(err => console.error('[Services] Init failed:', err));
+    startBackgroundServices().catch(err => console.error('[Services] Init failed:', err));
   });
 }
 

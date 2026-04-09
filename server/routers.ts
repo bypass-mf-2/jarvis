@@ -67,6 +67,7 @@ import {
   trainSpecializedModel,
   getTrainingStats,
 } from "./autoTrain.js";
+import { processWithAgentSwarm, getAgentStatus } from "./multiAgent.js";
 
 // ── Chat Router ───────────────────────────────────────────────────────────────
 const chatRouter = router({
@@ -599,6 +600,35 @@ const trainingRouter = router({
     }),
 });
 
+// Multi-Agent Swarm Router
+const multiAgentRouter = router({
+  // Process complex query with agent swarm
+  processQuery: publicProcedure
+    .input(z.object({
+      query: z.string(),
+      conversationId: z.number().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      try {
+        const result = await processWithAgentSwarm(input.query);
+        return {
+          success: true,
+          result: result,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err.message,
+        };
+      }
+    }),
+
+  // Get agent status
+  getStatus: publicProcedure.query(async () => {
+    return getAgentStatus();
+  }),
+});
+
 // ── App Router ────────────────────────────────────────────────────────────────
 export const appRouter = router({
   system: systemRouter,
@@ -623,6 +653,7 @@ export const appRouter = router({
   code: codeRouter,
   search: searchRouter,
   settings: settingsRouter,
+  multiAgent: multiAgentRouter, // ← ADD THIS LINE
 });
 
 export type AppRouter = typeof appRouter;

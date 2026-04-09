@@ -6,29 +6,15 @@ import { startMemoryConsolidation } from "./persistentMemory.js";
 import { initializeDefaultSettings } from "./llmSettings.js";
 import { startVoiceLearning } from "./voiceLearning.js";
 import { startScraperScheduler, scrapeAllSources } from "./scraper";
-// selfImprovement doesn't export a scheduler, use a no-op wrapper
-const startSelfImprovementScheduler = (_intervalMs?: number) => {};
 import { logger } from "./logger";
 import {
   addScrapeSource,
   getScrapeSources,
 } from "./db";
-import {
-  startAutonomousScheduler,
-  setAutonomyLevel,
-} from "./autonomousImprovement.js";
 import { startSourceDiscoveryScheduler } from "./sourceDiscovery.js";
-// multiAgent doesn't export startAgentOptimization
 import {
-  collectTrainingExample,
-  exportTrainingData,
-  trainNewModel,
-  trainSpecializedModel,
-  getTrainingStats,
   startAutoTraining,
-  smartRouteModel,
 } from "./autoTrain.js";
-
 
 // Default RSS sources to seed on first run (16 high-quality feeds)
 const DEFAULT_SOURCES = [
@@ -134,36 +120,13 @@ const DEFAULT_SOURCES = [
   },
 ];
 
-export async function seedDefaultSources(): Promise<{ seeded: number; scraped: boolean }> {
-  try {
-    const existing = await getScrapeSources();
-    if (existing.length > 0) {
-      return { seeded: existing.length, scraped: false };
-    }
-    for (const source of DEFAULT_SOURCES) {
-      await addScrapeSource(source);
-    }
-    await logger.info("services", `Seeded ${DEFAULT_SOURCES.length} default sources`);
-    // Run initial scrape
-    try {
-      const result = await scrapeAllSources();
-      await logger.info("services", `Initial scrape: ${result.succeeded} succeeded, ${result.failed} failed`);
-      return { seeded: DEFAULT_SOURCES.length, scraped: true };
-    } catch (err) {
-      await logger.warn("services", `Initial scrape failed: ${String(err)}`);
-      return { seeded: DEFAULT_SOURCES.length, scraped: false };
-    }
-  } catch (err) {
-    await logger.error("services", `Failed to seed sources: ${String(err)}`);
-    throw err;
-  }
-}
+export async function startBackgroundServices(): Promise<void> {
+  await logger.info("services", "Initializing ALL background services...");
 
-export async function initializeServices(): Promise<void> {
-  await logger.info("services", "Initializing background services...");
+  // Initialize LLM settings first
+  await initializeDefaultSettings();
 
   // Seed default scrape sources if none exist
-  let shouldRunInitialScrape = false;
   try {
     const existing = await getScrapeSources();
     if (existing.length === 0) {
@@ -172,57 +135,57 @@ export async function initializeServices(): Promise<void> {
         await addScrapeSource(source);
       }
       await logger.info("services", `Seeded ${DEFAULT_SOURCES.length} default sources`);
-      shouldRunInitialScrape = true;
+      
+      // Run initial scrape
+      await logger.info("services", "Running initial scrape...");
+      try {
+        const result = await scrapeAllSources();
+        await logger.info("services", `Initial scrape: ${result.succeeded} succeeded, ${result.failed} failed`);
+      } catch (err) {
+        await logger.warn("services", `Initial scrape failed: ${String(err)}`);
+      }
     }
   } catch (err) {
     await logger.warn("services", `Failed to seed sources: ${String(err)}`);
   }
 
-  // Run initial scrape if we just seeded sources
-  if (shouldRunInitialScrape) {
-    await logger.info("services", "Running initial scrape to populate knowledge base...");
-    try {
-      const result = await scrapeAllSources();
-      await logger.info("services", `Initial scrape complete: ${result.succeeded} succeeded, ${result.failed} failed`);
-    } catch (err) {
-      await logger.warn("services", `Initial scrape failed: ${String(err)}`);
-    }
-  }
-
-  // Start scraper (every 1 minute)
+  // Start scraper (every 1 minute by default, configurable via env)
   const scraperInterval = parseInt(process.env.SCRAPER_INTERVAL_MS ?? "60000");
   startScraperScheduler(scraperInterval);
-
-  // Start self-improvement (every 6 hours)
-  const improvementInterval = parseInt(process.env.IMPROVEMENT_INTERVAL_MS ?? "21600000");
-  startSelfImprovementScheduler(improvementInterval);
-
-  // Start web crawl & source discovery (every 2 minutes)
-  startSourceDiscoveryScheduler(60 * 1000);
-
-  await logger.info("services", "All background services initialized");
-}
-
-export async function startBackgroundServices() {
-  // Initialize LLM settings
-  await initializeDefaultSettings();
-
-  // Start scheduled services
-  startScraperScheduler();
-  startSelfImprovementScheduler();
+  await logger.info("services", `✅ Scraper started (${scraperInterval / 1000}s intervals)`);
 
   // Start memory consolidation (processes conversations hourly)
   startMemoryConsolidation(60 * 60 * 1000);
+  await logger.info("services", "✅ Memory consolidation started (hourly)");
 
   // Start voice learning (updates daily)
   startVoiceLearning(24 * 60 * 60 * 1000);
+  await logger.info("services", "✅ Voice learning started (daily)");
 
   // Start auto-training (runs weekly)
   startAutoTraining(7 * 24 * 60 * 60 * 1000);
+  await logger.info("services", "✅ Auto-training started (weekly)");
 
-  // Start web crawl & source discovery (every 2 minutes)
-  startSourceDiscoveryScheduler(60 * 1000);
+  // Start source discovery (every 1 minute)
+  startSourceDiscoveryScheduler(30* 60 * 1000);
+  await logger.info("services", "✅ Source discovery started (1 min intervals)");
 
-  logger.info("services", "All systems online - JARVIS activated");
+  await logger.info("services", "🚀 ALL SYSTEMS ONLINE - JARVIS FULLY ACTIVATED");
 }
 
+export async function seedDefaultSources(): Promise<{ seeded: number; scraped: boolean }> {
+  const existing = await getScrapeSources();
+  if (existing.length > 0) {
+    return { seeded: existing.length, scraped: false };
+  }
+  for (const source of DEFAULT_SOURCES) {
+    await addScrapeSource(source);
+  }
+  await logger.info("services", `Seeded ${DEFAULT_SOURCES.length} default sources`);
+  try {
+    const result = await scrapeAllSources();
+    return { seeded: DEFAULT_SOURCES.length, scraped: true };
+  } catch {
+    return { seeded: DEFAULT_SOURCES.length, scraped: false };
+  }
+}

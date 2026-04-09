@@ -24,7 +24,7 @@ let _activeCount = 0;
 
 // How many concurrent Ollama requests to allow
 // Ollama serializes internally, but we allow 1 active + 1 queued to pipeline
-const MAX_CONCURRENT = 1;
+const MAX_CONCURRENT = 3;
 
 async function processQueue(): Promise<void> {
   if (_processing) return;

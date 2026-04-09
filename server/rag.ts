@@ -44,6 +44,20 @@ async function buildAugmentedMessages(
 
   let systemContent = JARVIS_SYSTEM_PROMPT;
 
+  // ✅ ADD WORLD CLOCK AND TIMEZONE INFO
+  const now = new Date();
+  const timeInfo = `\n\n=== CURRENT DATE & TIME ===
+Current UTC Time: ${now.toUTCString()}
+Current Local Time: ${now.toLocaleString('en-US', { timeZone: 'America/Denver', timeZoneName: 'short' })}
+Unix Timestamp: ${now.getTime()}
+ISO 8601: ${now.toISOString()}
+
+Note: All message timestamps in the conversation history are in milliseconds since Unix epoch. 
+You can use this to understand the chronological order of events and calculate time differences.
+=== END TIME INFO ===`;
+
+  systemContent += timeInfo;
+
     // ✅ ADD THIS: Include memory in system prompt
   if (memoryContext) {
     systemContent += "\n\n" + memoryContext;
@@ -67,7 +81,28 @@ async function buildAugmentedMessages(
 
   const messages: OllamaMessage[] = [
     { role: "system", content: systemContent },
-    ...conversationHistory.slice(-10), // Keep last 10 turns for context window
+    ...conversationHistory.slice(-10).map((msg, idx) => {
+      // Add timestamp info to help AI understand chronology
+      // If message has createdAt, include it
+      const msgWithTime = msg as any;
+      if (msgWithTime.createdAt) {
+        const msgDate = new Date(msgWithTime.createdAt);
+        const timeAgo = Math.floor((Date.now() - msgDate.getTime()) / 1000);
+        const timeStr = timeAgo < 60 
+          ? `${timeAgo}s ago` 
+          : timeAgo < 3600 
+          ? `${Math.floor(timeAgo / 60)}m ago`
+          : timeAgo < 86400
+          ? `${Math.floor(timeAgo / 3600)}h ago`
+          : `${Math.floor(timeAgo / 86400)}d ago`;
+        
+        return {
+          role: msg.role,
+          content: `[${timeStr}] ${msg.content}`
+        };
+      }
+      return msg;
+    }),
     { role: "user", content: userMessage },
   ];
 

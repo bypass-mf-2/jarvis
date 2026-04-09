@@ -12,7 +12,8 @@
  * - Validating solutions
  */
 
-import * as vm from "vm";
+import ivm from "isolated-vm";
+import vm from "vm";
 import { exec } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs";
@@ -36,29 +37,49 @@ export async function executeJavaScript(
   const startTime = Date.now();
 
   try {
-    const sandbox = {
-      console: {
-        log: (...args: any[]) => console.log("[SANDBOX]", ...args),
-        error: (...args: any[]) => console.error("[SANDBOX]", ...args),
-      },
-      result: undefined as any,
-    };
-    const context = vm.createContext(sandbox);
-    const result = vm.runInContext(code, context, { timeout });
+    // Create isolated VM
+    const isolate = new ivm.Isolate({ memoryLimit: 128 }); // 128MB limit
+    const context = await isolate.createContext();
+
+    // Create console.log capture
+    const logs: string[] = [];
+    const logScript = await isolate.compileScript(`
+      global.console = {
+        log: (...args) => {
+          $0.applyIgnored(undefined, args.map(String), { arguments: { copy: true } });
+        }
+      };
+    `);
+    await logScript.run(context);
+    
+    // Set up log callback
+    await context.global.set('$0', new ivm.Reference((...args: string[]) => {
+      logs.push(args.join(' '));
+    }));
+
+    // Compile and run user code
+    const script = await isolate.compileScript(code);
+    const result = await script.run(context, { timeout });
+
     const executionTime = Date.now() - startTime;
 
     return {
       success: true,
-      output: result,
+      output: {
+        result: result,
+        logs: logs
+      },
       executionTime,
     };
+  } catch (err: any) {
+    const executionTime = Date.now() - startTime;
+    await logger.error("codeExec", `JavaScript execution failed: ${err.message}`);
 
-  } catch (err) {
     return {
       success: false,
       output: null,
-      error: String(err),
-      executionTime: Date.now() - startTime,
+      error: err.message,
+      executionTime,
     };
   }
 }

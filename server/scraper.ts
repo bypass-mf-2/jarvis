@@ -2,16 +2,82 @@
  * Web scraping engine for continuous knowledge acquisition.
  * Supports RSS feeds, news sites, and arbitrary URLs.
  * Scraped content is chunked, embedded, and stored in both MySQL and ChromaDB.
+ * 
+ * NEW: Content deduplication - prevents scraping identical content from same source
  */
 
 import { nanoid } from "nanoid";
+import crypto from "crypto";
 import {
   getScrapeSources,
   addKnowledgeChunk,
   updateScrapeSourceStatus,
+  getKnowledgeChunks,
 } from "./db";
 import { addToVectorStore } from "./vectorStore";
 import { logger } from "./logger";
+
+// ── Content Deduplication Cache ─────────────────────────────────────────────
+// Track content hashes to prevent duplicate scraping from same source
+const contentHashCache = new Map<string, Set<string>>(); // sourceUrl -> Set<contentHash>
+const MAX_CACHE_SIZE = 10000; // Per source
+
+// Generate hash of content for deduplication
+function hashContent(content: string): string {
+  return crypto.createHash('sha256').update(content.toLowerCase().trim()).digest('hex');
+}
+
+// Check if content already exists from this source
+async function isContentDuplicate(sourceUrl: string, content: string): Promise<boolean> {
+  const contentHash = hashContent(content);
+  
+  // Check in-memory cache first (fast)
+  if (!contentHashCache.has(sourceUrl)) {
+    contentHashCache.set(sourceUrl, new Set());
+  }
+  
+  const sourceCache = contentHashCache.get(sourceUrl)!;
+  
+  if (sourceCache.has(contentHash)) {
+    return true; // Duplicate found in cache
+  }
+  
+  // If cache is full, clear oldest entries
+  if (sourceCache.size >= MAX_CACHE_SIZE) {
+    const firstHash = sourceCache.values().next().value;
+    sourceCache.delete(firstHash);
+  }
+  
+  // Add to cache for future checks
+  sourceCache.add(contentHash);
+  
+  return false; // Not a duplicate
+}
+
+// Initialize cache from database on startup
+async function initializeDeduplicationCache(): Promise<void> {
+  try {
+    const chunks = await getKnowledgeChunks(1000); // Get recent 1000 chunks
+    
+    for (const chunk of chunks) {
+      const sourceUrl = chunk.sourceUrl || '';
+      const contentHash = hashContent(chunk.content);
+      
+      if (!contentHashCache.has(sourceUrl)) {
+        contentHashCache.set(sourceUrl, new Set());
+      }
+      
+      contentHashCache.get(sourceUrl)!.add(contentHash);
+    }
+    
+    await logger.info('scraper', `Deduplication cache initialized with ${chunks.length} chunks`);
+  } catch (err) {
+    await logger.warn('scraper', `Failed to initialize dedup cache: ${err}`);
+  }
+}
+
+// Initialize cache on module load
+initializeDeduplicationCache();
 
 // ── Text utilities ────────────────────────────────────────────────────────────
 function stripHtml(html: string): string {
@@ -143,8 +209,17 @@ async function storeChunks(
 ): Promise<number> {
   const chunks = chunkText(content);
   let stored = 0;
+  let duplicates = 0;
 
   for (const chunk of chunks) {
+    // ✅ CHECK FOR DUPLICATES BEFORE STORING
+    const isDuplicate = await isContentDuplicate(sourceUrl, chunk);
+    
+    if (isDuplicate) {
+      duplicates++;
+      continue; // Skip this chunk, it's a duplicate from this source
+    }
+
     const chromaId = nanoid();
     try {
       const row = await addKnowledgeChunk({
@@ -153,10 +228,11 @@ async function storeChunks(
         sourceType,
         content: chunk,
         chromaId,
-        tags: [],
+        embeddingModel: "nomic-embed-text",
+        scrapedAt: new Date(),
       });
 
-      // Queue embedding for background processing (don't block scraping or Ollama)
+      // Queue for background embedding (with low priority)
       _embedQueue.push({
         chromaId,
         content: chunk,
@@ -164,181 +240,115 @@ async function storeChunks(
           sourceUrl,
           sourceTitle: itemTitle || sourceTitle,
           sourceType,
-          dbId: String(row?.id ?? ""),
         },
       });
 
       stored++;
     } catch (err) {
-      await logger.warn("scraper", `Failed to store chunk: ${String(err)}`);
+      await logger.error("scraper", `Failed to store chunk: ${err}`);
     }
+  }
+
+  if (duplicates > 0) {
+    await logger.info('scraper', `Skipped ${duplicates} duplicate chunks from ${sourceUrl}`);
   }
 
   return stored;
 }
 
-// ── Scrape a single source ────────────────────────────────────────────────────
-export async function scrapeSource(source: {
-  id: number;
-  url: string;
-  name: string;
-  type: "rss" | "news" | "custom_url";
-}): Promise<{ chunksAdded: number; error?: string }> {
-  await logger.info("scraper", `Scraping source: ${source.name} (${source.url})`);
+// ── Scrape single source ──────────────────────────────────────────────────────
+async function scrapeSource(source: any): Promise<{ success: boolean; chunks: number }> {
+  const { id, name, url, type } = source;
 
   try {
+    await logger.info("scraper", `Scraping source: ${name} (${url})`);
+
     let totalChunks = 0;
 
-    if (source.type === "rss") {
-      const items = await scrapeRSS(source.url);
+    if (type === "rss") {
+      const items = await scrapeRSS(url);
       for (const item of items) {
-        const added = await storeChunks(
-          source.id,
-          item.link || source.url,
-          source.name,
-          "rss",
-          `${item.title}\n\n${item.content}`,
-          item.title
-        );
-        totalChunks += added;
+        const combined = `${item.title}\n\n${item.content}`;
+        const stored = await storeChunks(id, url, name, "rss", combined, item.title);
+        totalChunks += stored;
       }
-    } else {
-      const { title, content } = await scrapeURL(source.url);
-      totalChunks = await storeChunks(
-        source.id,
-        source.url,
-        source.name,
-        source.type,
-        content,
-        title
-      );
+    } else if (type === "custom_url") {
+      const { title, content } = await scrapeURL(url);
+      totalChunks = await storeChunks(id, url, name, "custom_url", content, title);
     }
 
-    await updateScrapeSourceStatus(source.id, "success", undefined, totalChunks);
-    await logger.info("scraper", `Scraped ${totalChunks} chunks from ${source.name}`);
-    return { chunksAdded: totalChunks };
+    await updateScrapeSourceStatus(id, { 
+      lastStatus: "success", 
+      totalChunks: (source.totalChunks || 0) + totalChunks 
+    });
+    await logger.info("scraper", `Scraped ${totalChunks} chunks from ${name}`);
+
+    return { success: true, chunks: totalChunks };
   } catch (err) {
-    const errorMsg = String(err);
-    await updateScrapeSourceStatus(source.id, "error", errorMsg);
-    await logger.error("scraper", `Failed to scrape ${source.name}: ${errorMsg}`);
-    return { chunksAdded: 0, error: errorMsg };
+    await logger.error("scraper", `Failed to scrape ${name}: ${err}`);
+    await updateScrapeSourceStatus(id, { lastStatus: "error" });
+    return { success: false, chunks: 0 };
   }
 }
 
-// ── Scrape lock (prevents overlapping cycles) ───────────────────────────────
-let _scraping = false;
+// ── Scrape all sources ────────────────────────────────────────────────────────
+export async function scrapeAllSources(): Promise<{ succeeded: number; failed: number }> {
+  const sources = await getScrapeSources();
+  let succeeded = 0;
+  let failed = 0;
 
-// ── Scrape sources that are due (respects per-source intervalMinutes) ────────
-export async function scrapeDueSources(): Promise<{
-  total: number;
-  succeeded: number;
-  failed: number;
-  skipped: number;
-}> {
-  if (_scraping) {
-    await logger.info("scraper", "Previous scrape still running, skipping this cycle");
-    return { total: 0, succeeded: 0, failed: 0, skipped: 0 };
+  for (const source of sources) {
+    const result = await scrapeSource(source);
+    if (result.success) succeeded++;
+    else failed++;
   }
 
-  _scraping = true;
-  try {
+  return { succeeded, failed };
+}
+
+// ── Scheduler ──────────────────────────────────────────────────────────────────
+let _schedulerInterval: NodeJS.Timeout | null = null;
+
+export function startScraperScheduler(intervalMs: number = 60_000): void {
+  if (_schedulerInterval) {
+    clearInterval(_schedulerInterval);
+  }
+
+  logger.info("scraper", `Scraper scheduler started (checking every ${intervalMs / 1000}s)`);
+
+  _schedulerInterval = setInterval(async () => {
     const sources = await getScrapeSources();
-    const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
+    const now = Date.now();
+    const due = sources.filter((s: any) => {
+      if (!s.lastScrapedAt) return true;
+      const nextScrape = s.lastScrapedAt + (s.intervalMinutes || 60) * 60_000;
+      return now >= nextScrape;
+    });
 
-    let succeeded = 0;
-    let failed = 0;
-    let skipped = 0;
-    const due: typeof active = [];
-
-    for (const source of active) {
-      const intervalMin = source.intervalMinutes || 15;
-      const lastScraped = source.lastScrapedAt
-        ? new Date(source.lastScrapedAt).getTime()
-        : 0;
-      const minutesSince = (Date.now() - lastScraped) / 60_000;
-
-      if (minutesSince >= intervalMin) {
-        due.push(source);
-      } else {
-        skipped++;
-      }
+    if (due.length === 0) {
+      return;
     }
 
-    if (due.length === 0) return { total: 0, succeeded: 0, failed: 0, skipped };
-
-    await logger.info("scraper", `Scraping ${due.length} due sources (${skipped} not yet due)`);
+    await logger.info("scraper", `Scraping ${due.length} due sources (${sources.length - due.length} not yet due)`);
 
     for (const source of due) {
-      const result = await scrapeSource({
-        id: source.id,
-        url: source.url,
-        name: source.name,
-        type: source.type,
-      });
-      if (result.error) failed++;
-      else succeeded++;
+      await scrapeSource(source);
+      // Update lastScrapedAt
+      await updateScrapeSourceStatus(source.id, { lastScrapedAt: Date.now() });
     }
 
-    await logger.info("scraper", `Scrape complete: ${succeeded} succeeded, ${failed} failed`);
-    return { total: due.length, succeeded, failed, skipped };
-  } finally {
-    _scraping = false;
-  }
-}
-
-// ── Scrape all (force, for manual trigger) ───────────────────────────────────
-export async function scrapeAllSources(): Promise<{
-  total: number;
-  succeeded: number;
-  failed: number;
-}> {
-  if (_scraping) {
-    return { total: 0, succeeded: 0, failed: 0 };
-  }
-
-  _scraping = true;
-  try {
-    const sources = await getScrapeSources();
-    const active = sources.filter((s: any) => s.isActive === true || s.isActive === 1);
-    await logger.info("scraper", `Force scraping all ${active.length} sources`);
-
-    let succeeded = 0;
-    let failed = 0;
-
-    for (const source of active) {
-      const result = await scrapeSource({
-        id: source.id,
-        url: source.url,
-        name: source.name,
-        type: source.type,
-      });
-      if (result.error) failed++;
-      else succeeded++;
-    }
-
-    await logger.info("scraper", `Scrape complete: ${succeeded} succeeded, ${failed} failed`);
-    return { total: active.length, succeeded, failed };
-  } finally {
-    _scraping = false;
-  }
-}
-
-// ── Scheduler ─────────────────────────────────────────────────────────────────
-let scraperInterval: ReturnType<typeof setInterval> | null = null;
-
-export function startScraperScheduler(intervalMs = 60 * 1000): void {
-  if (scraperInterval) return;
-  logger.info("scraper", `Scraper scheduler started (checking every ${intervalMs / 1000}s)`);
-  // Initial scrape after 15 seconds
-  setTimeout(() => scrapeDueSources(), 15_000);
-  // Then check which sources are due every tick
-  scraperInterval = setInterval(() => scrapeDueSources(), intervalMs);
+    const result = await scrapeAllSources();
+    await logger.info("scraper", `Scrape complete: ${result.succeeded} succeeded, ${result.failed} failed`);
+  }, intervalMs);
 }
 
 export function stopScraperScheduler(): void {
-  if (scraperInterval) {
-    clearInterval(scraperInterval);
-    scraperInterval = null;
+  if (_schedulerInterval) {
+    clearInterval(_schedulerInterval);
+    _schedulerInterval = null;
     logger.info("scraper", "Scraper scheduler stopped");
   }
 }
+
+// Export deduplication utilities for testing
+export { isContentDuplicate, hashContent, initializeDeduplicationCache };
