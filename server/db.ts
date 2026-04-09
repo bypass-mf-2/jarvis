@@ -394,6 +394,128 @@ export async function getDb() {
 }
 
 
+// ── Crawl Frontier ──────────────────────────────────────────────────────────
+export async function addToFrontier(url: string, domain: string, depth: number, priority: number, discoveredFrom?: string) {
+  try {
+    sqliteInsert(
+      "INSERT OR IGNORE INTO crawl_frontier (url, domain, depth, priority, discoveredFrom, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+      [url, domain, depth, priority, discoveredFrom ?? null, Date.now()]
+    );
+  } catch { /* ignore duplicates */ }
+}
+
+export async function getNextFrontierUrls(limit: number, maxPerDomain: number): Promise<any[]> {
+  // Get top-priority pending URLs, respecting domain diversity
+  const all = sqliteRun(
+    "SELECT * FROM crawl_frontier WHERE status = 'pending' ORDER BY priority DESC, createdAt ASC LIMIT ?",
+    [limit * 5]
+  );
+  const domainCounts = new Map<string, number>();
+  const selected: any[] = [];
+  for (const row of all) {
+    const count = domainCounts.get(row.domain) || 0;
+    if (count >= maxPerDomain) continue;
+    domainCounts.set(row.domain, count + 1);
+    selected.push(row);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+export async function markFrontierScraped(url: string) {
+  sqliteRun("UPDATE crawl_frontier SET status = 'scraped', scrapedAt = ? WHERE url = ?", [Date.now(), url]);
+}
+
+export async function markFrontierFailed(url: string) {
+  sqliteRun("UPDATE crawl_frontier SET status = 'failed' WHERE url = ?", [url]);
+}
+
+export async function getFrontierStats(): Promise<{ pending: number; scraped: number; failed: number }> {
+  const rows = sqliteRun("SELECT status, COUNT(*) as count FROM crawl_frontier GROUP BY status");
+  const stats = { pending: 0, scraped: 0, failed: 0 };
+  for (const row of rows) {
+    if (row.status === 'pending') stats.pending = row.count;
+    if (row.status === 'scraped') stats.scraped = row.count;
+    if (row.status === 'failed') stats.failed = row.count;
+  }
+  return stats;
+}
+
+export async function isFrontierUrl(url: string): Promise<boolean> {
+  const rows = sqliteRun("SELECT 1 FROM crawl_frontier WHERE url = ? LIMIT 1", [url]);
+  return rows.length > 0;
+}
+
+// ── Topic Rotation ──────────────────────────────────────────────────────────
+export async function recordTopicUsed(topic: string) {
+  sqliteInsert("INSERT INTO crawl_topics_used (topic, searchedAt) VALUES (?, ?)", [topic, Date.now()]);
+}
+
+export async function getRecentlyUsedTopics(sinceMs: number): Promise<string[]> {
+  const cutoff = Date.now() - sinceMs;
+  const rows = sqliteRun("SELECT DISTINCT topic FROM crawl_topics_used WHERE searchedAt > ?", [cutoff]);
+  return rows.map((r: any) => r.topic);
+}
+
+// ── Domain Scores ───────────────────────────────────────────────────────────
+export async function upsertDomainScore(domain: string, pagesAdded: number, chunksAdded: number) {
+  const existing = sqliteRun("SELECT * FROM domain_scores WHERE domain = ? LIMIT 1", [domain]);
+  if (existing.length > 0) {
+    sqliteRun(
+      "UPDATE domain_scores SET pages_scraped = pages_scraped + ?, chunks_stored = chunks_stored + ?, last_scraped_at = ? WHERE domain = ?",
+      [pagesAdded, chunksAdded, Date.now(), domain]
+    );
+  } else {
+    sqliteInsert(
+      "INSERT INTO domain_scores (domain, pages_scraped, chunks_stored, last_scraped_at, createdAt) VALUES (?, ?, ?, ?, ?)",
+      [domain, pagesAdded, chunksAdded, Date.now(), Date.now()]
+    );
+  }
+}
+
+export async function incrementDomainRetrievals(domain: string) {
+  sqliteRun("UPDATE domain_scores SET chunks_retrieved = chunks_retrieved + 1 WHERE domain = ?", [domain]);
+}
+
+export async function updateDomainRating(domain: string, rating: number) {
+  const existing = sqliteRun("SELECT * FROM domain_scores WHERE domain = ? LIMIT 1", [domain]);
+  if (existing.length > 0) {
+    // Weighted moving average
+    const old = existing[0];
+    const newAvg = old.avg_rating ? (old.avg_rating * 0.8 + rating * 0.2) : rating;
+    const newQuality = (newAvg / 5) * 0.4 + (old.chunks_retrieved / Math.max(old.chunks_stored, 1)) * 0.6;
+    sqliteRun("UPDATE domain_scores SET avg_rating = ?, quality_score = ? WHERE domain = ?", [newAvg, Math.min(newQuality, 1.0), domain]);
+  }
+}
+
+export async function getTopDomains(limit: number = 20): Promise<any[]> {
+  return sqliteRun("SELECT * FROM domain_scores WHERE chunks_stored > 0 ORDER BY quality_score DESC LIMIT ?", [limit]);
+}
+
+export async function getDomainScore(domain: string): Promise<number> {
+  const rows = sqliteRun("SELECT quality_score FROM domain_scores WHERE domain = ? LIMIT 1", [domain]);
+  return rows.length > 0 ? (rows[0].quality_score ?? 0.5) : 0.5;
+}
+
+// ── Chunk Retrieval Tracking ────────────────────────────────────────────────
+export async function recordChunkRetrieval(chunkId: number, messageId?: number) {
+  sqliteInsert(
+    "INSERT INTO chunk_retrievals (chunkId, messageId, retrievedAt) VALUES (?, ?, ?)",
+    [chunkId, messageId ?? null, Date.now()]
+  );
+}
+
+export async function updateChunkRetrievalRating(messageId: number, rating: number) {
+  sqliteRun("UPDATE chunk_retrievals SET userRating = ? WHERE messageId = ?", [rating, messageId]);
+}
+
+export async function getChunkRetrievalCounts(): Promise<Map<number, number>> {
+  const rows = sqliteRun("SELECT chunkId, COUNT(*) as count FROM chunk_retrievals GROUP BY chunkId ORDER BY count DESC LIMIT 500");
+  const map = new Map<number, number>();
+  for (const row of rows) map.set(row.chunkId, row.count);
+  return map;
+}
+
 // ─── v2.0 Database Functions ────────────────────────────────────────────────────
 export async function getAutonomyConfig() {
   if (USE_MYSQL) {

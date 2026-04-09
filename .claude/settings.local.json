@@ -32,7 +32,11 @@
       "Bash(\"/c/Users/trevo/AppData/Roaming/Python/Python313/Scripts/chroma.exe\" run:*)",
       "Bash(curl -s http://localhost:8000/api/v2/heartbeat)",
       "Bash(curl -s http://localhost:11434/api/tags)",
-      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")"
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "Bash(npx tsx:*)",
+      "Bash(node -e \"const { resolve } = require\\('path'\\); const tsxPath = require.resolve\\('tsx'\\); console.log\\('tsx at:', tsxPath\\); console.log\\('dir:', resolve\\(tsxPath, '..'\\)\\); const fs = require\\('fs'\\); const dir = resolve\\(tsxPath, '..'\\); console.log\\(fs.readdirSync\\(dir\\).filter\\(f => f.includes\\('esm'\\) || f.includes\\('loader'\\) || f.includes\\('register'\\)\\)\\)\")",
+      "Bash(node -e \"const p = require.resolve\\('tsx/esm'\\); console.log\\(p\\)\")",
+      "Bash(node -e \"import\\('tsx/esm/api'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")"
     ]
   }
 }

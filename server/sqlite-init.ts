@@ -247,6 +247,54 @@ CREATE TABLE IF NOT EXISTS source_metrics (
   last_evaluated INTEGER DEFAULT (strftime('%s', 'now') * 1000)
 );
 
+-- Crawl frontier: persistent URL queue for web crawling
+CREATE TABLE IF NOT EXISTS crawl_frontier (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  url TEXT NOT NULL UNIQUE,
+  domain TEXT NOT NULL,
+  depth INTEGER DEFAULT 0,
+  priority REAL DEFAULT 0.5,
+  status TEXT DEFAULT 'pending',
+  discoveredFrom TEXT,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+  scrapedAt INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_crawlFrontier_status ON crawl_frontier(status);
+CREATE INDEX IF NOT EXISTS idx_crawlFrontier_domain ON crawl_frontier(domain);
+CREATE INDEX IF NOT EXISTS idx_crawlFrontier_priority ON crawl_frontier(priority);
+
+-- Topic rotation: track which topics have been searched
+CREATE TABLE IF NOT EXISTS crawl_topics_used (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic TEXT NOT NULL,
+  searchedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+CREATE INDEX IF NOT EXISTS idx_crawlTopicsUsed_topic ON crawl_topics_used(topic);
+
+-- Domain scores: track which domains produce useful content
+CREATE TABLE IF NOT EXISTS domain_scores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain TEXT NOT NULL UNIQUE,
+  pages_scraped INTEGER DEFAULT 0,
+  chunks_stored INTEGER DEFAULT 0,
+  chunks_retrieved INTEGER DEFAULT 0,
+  avg_rating REAL DEFAULT 0,
+  quality_score REAL DEFAULT 0.5,
+  last_scraped_at INTEGER,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+CREATE INDEX IF NOT EXISTS idx_domainScores_quality ON domain_scores(quality_score);
+
+-- Chunk retrieval tracking: which chunks are actually used by RAG
+CREATE TABLE IF NOT EXISTS chunk_retrievals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chunkId INTEGER NOT NULL,
+  messageId INTEGER,
+  userRating INTEGER,
+  retrievedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+CREATE INDEX IF NOT EXISTS idx_chunkRetrievals_chunkId ON chunk_retrievals(chunkId);
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_conversations_userId ON conversations(userId);
 CREATE INDEX IF NOT EXISTS idx_messages_conversationId ON messages(conversationId);

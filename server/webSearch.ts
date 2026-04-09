@@ -1,20 +1,11 @@
 /**
- * Real-Time Web Search with ULTRA-AGGRESSIVE HYBRID SCRAPING
- * 
- * Now uses the aggressive scraper fleet for maximum speed:
- * - Automatic routing between free/paid methods
- * - Proxy rotation for unlimited requests
- * - User-agent randomization
- * - Smart rate limiting
- * - Cost optimization
- * 
- * Can handle 50-500 searches/minute depending on API keys
+ * Web Search via SerpAPI and ScrapingAnt
  */
 
 import { logger } from "./logger.js";
 import { aggressiveSearch, aggressiveBatchSearch } from "./aggressiveScraper.js";
 
-// ── Main Search Function (uses aggressive scraper) ─────────────────────────
+// ── Main Search Function ─────────────────────────────────────────────────
 export async function searchWeb(
   query: string
 ): Promise<Array<{ title: string; url: string; snippet: string }>> {
@@ -22,13 +13,7 @@ export async function searchWeb(
 
   try {
     const result = await aggressiveSearch(query);
-    
-    // Parse results based on which node was used
-    if (result.node.includes('api')) {
-      return parseAPIResults(result.results, result.node);
-    } else {
-      return parseHTMLResults(result.results);
-    }
+    return parseResults(result.results, result.node);
   } catch (err) {
     await logger.error("webSearch", `Search failed: ${err}`);
     return [];
@@ -43,37 +28,20 @@ export async function batchSearchWeb(
 
   try {
     const results = await aggressiveBatchSearch(queries);
-    
-    return results.map(result => {
-      if (result.node.includes('api')) {
-        return parseAPIResults(result.results, result.node);
-      } else {
-        return parseHTMLResults(result.results);
-      }
-    });
+    return results.map(result => parseResults(result.results, result.node));
   } catch (err) {
     await logger.error("webSearch", `Batch search failed: ${err}`);
     return [];
   }
 }
 
-// ── Parse API Results ───────────────────────────────────────────────────────
-function parseAPIResults(
+// ── Parse Results ──────────────────────────────────────────────────────────
+function parseResults(
   data: any,
   nodeId: string
 ): Array<{ title: string; url: string; snippet: string }> {
-  
-  // Brave API format
-  if (nodeId === 'brave-api') {
-    const webResults = data.web?.results || [];
-    return webResults.map((r: any) => ({
-      title: r.title || '',
-      url: r.url || '',
-      snippet: r.description || '',
-    }));
-  }
-  
-  // SerpAPI format
+
+  // SerpAPI format (JSON)
   if (nodeId === 'serpapi') {
     const organicResults = data.organic_results || [];
     return organicResults.map((r: any) => ({
@@ -82,64 +50,23 @@ function parseAPIResults(
       snippet: r.snippet || '',
     }));
   }
-  
-  // Bing API format
-  if (nodeId === 'bing-api') {
-    const webPages = data.webPages?.value || [];
-    return webPages.map((r: any) => ({
-      title: r.name || '',
-      url: r.url || '',
-      snippet: r.snippet || '',
-    }));
+
+  // ScrapingAnt format (HTML from Google)
+  if (nodeId === 'scrapingant') {
+    return parseHTMLResults(data);
   }
-  
+
   return [];
 }
 
-// ── Parse HTML Results (DuckDuckGo, Google via proxy) ──────────────────────
+// ── Parse HTML Results (ScrapingAnt returns Google HTML) ──────────────────
 function parseHTMLResults(
   html: string
 ): Array<{ title: string; url: string; snippet: string }> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
 
-  // Try DuckDuckGo format first
-  const ddgBlocks = html.match(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi) || [];
-  
-  if (ddgBlocks.length > 0) {
-    for (const block of ddgBlocks.slice(0, 10)) {
-      const hrefMatch = block.match(/href="([^"]*)"/);
-      const titleText = block.replace(/<[^>]+>/g, "").trim();
-
-      if (!hrefMatch?.[1] || !titleText) continue;
-
-      let url = hrefMatch[1];
-      const uddgMatch = url.match(/uddg=([^&]*)/);
-      if (uddgMatch) {
-        url = decodeURIComponent(uddgMatch[1]);
-      }
-
-      if (!url.startsWith("http")) continue;
-
-      results.push({
-        title: titleText,
-        url,
-        snippet: titleText,
-      });
-    }
-    
-    // Extract snippets
-    const snippetBlocks = html.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi) || [];
-    for (let i = 0; i < Math.min(snippetBlocks.length, results.length); i++) {
-      const text = snippetBlocks[i].replace(/<[^>]+>/g, "").trim();
-      if (text) results[i].snippet = text;
-    }
-    
-    return results;
-  }
-
-  // Try Google format
   const googleBlocks = html.match(/<div class="g"[\s\S]*?<\/div>/gi) || [];
-  
+
   for (const block of googleBlocks.slice(0, 10)) {
     const urlMatch = block.match(/<a href="([^"]*)"/);
     const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
@@ -159,12 +86,11 @@ function parseHTMLResults(
   return results;
 }
 
-// ── Fetch Page Content (with aggressive scraper) ───────────────────────────
+// ── Fetch Page Content ───────────────────────────────────────────────────
 export async function fetchPageContent(url: string): Promise<string> {
   await logger.info("webSearch", `Fetching page: ${url.slice(0, 50)}...`);
 
   try {
-    // Use aggressive scraper if available (with proxy rotation)
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -178,8 +104,7 @@ export async function fetchPageContent(url: string): Promise<string> {
     }
 
     const html = await response.text();
-    
-    // Extract main content (remove scripts, styles, etc.)
+
     let clean = html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -198,15 +123,14 @@ export async function fetchPageContent(url: string): Promise<string> {
   }
 }
 
-// ── Legacy API compatibility (backwards compatible) ────────────────────────
-export async function searchDuckDuckGo(query: string, maxResults = 10) {
-  return searchWeb(query);
-}
-
-export async function searchBrave(query: string, maxResults = 5) {
-  return searchWeb(query);
-}
-
-export async function searchGoogle(query: string, maxResults = 10) {
-  return searchWeb(query);
+// ── Search and Summarize ─────────────────────────────────────────────────
+export async function searchAndSummarize(
+  query: string
+): Promise<{ query: string; results: Array<{ title: string; url: string; snippet: string }>; summary: string }> {
+  const results = await searchWeb(query);
+  const summary = results
+    .slice(0, 5)
+    .map((r, i) => `${i + 1}. ${r.title}: ${r.snippet}`)
+    .join("\n");
+  return { query, results, summary: summary || "No results found." };
 }

@@ -4,10 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=jarvis
-Group=jarvis
-WorkingDirectory=/opt/jarvis-ai
-ExecStart=/opt/jarvis-ai/.venv/bin/chroma run --path /opt/jarvis-ai/chroma-data --host 127.0.0.1 --port 8000
+User=root
+WorkingDirectory=/root/jarvis
+ExecStart=/root/jarvis/.venv/bin/chroma run --path /root/jarvis/chroma-data --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 StandardOutput=journal

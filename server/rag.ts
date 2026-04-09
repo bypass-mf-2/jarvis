@@ -11,6 +11,7 @@ import { logger } from "./logger";
 import { getMemoryContext } from "./persistentMemory";
 import { searchWeb } from "./webSearch.js";
 import { smartRouteModel } from "./autoTrain.js";
+import { recordChunkRetrieval, incrementDomainRetrievals } from "./db";
 
 const JARVIS_SYSTEM_PROMPT = `You are JARVIS (Just A Rather Very Intelligent System), a highly capable AI assistant inspired by Tony Stark's AI. You are helpful, precise, and occasionally witty. You have access to a continuously updated knowledge base scraped from the internet.
 
@@ -61,6 +62,19 @@ You can use this to understand the chronological order of events and calculate t
     // ✅ ADD THIS: Include memory in system prompt
   if (memoryContext) {
     systemContent += "\n\n" + memoryContext;
+  }
+
+  // Track chunk retrievals for domain quality scoring
+  for (const chunk of ragChunks) {
+    try {
+      if (chunk.metadata?.id) {
+        await recordChunkRetrieval(chunk.metadata.id);
+      }
+      if (chunk.metadata?.sourceUrl) {
+        const domain = new URL(chunk.metadata.sourceUrl).hostname;
+        await incrementDomainRetrievals(domain);
+      }
+    } catch { /* non-critical tracking */ }
   }
 
   if (ragChunks.length > 0) {

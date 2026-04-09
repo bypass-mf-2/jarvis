@@ -277,16 +277,13 @@ async function scrapeSource(source: any): Promise<{ success: boolean; chunks: nu
       totalChunks = await storeChunks(id, url, name, "custom_url", content, title);
     }
 
-    await updateScrapeSourceStatus(id, { 
-      lastStatus: "success", 
-      totalChunks: (source.totalChunks || 0) + totalChunks 
-    });
+    await updateScrapeSourceStatus(id, "success", undefined, totalChunks);
     await logger.info("scraper", `Scraped ${totalChunks} chunks from ${name}`);
 
     return { success: true, chunks: totalChunks };
   } catch (err) {
     await logger.error("scraper", `Failed to scrape ${name}: ${err}`);
-    await updateScrapeSourceStatus(id, { lastStatus: "error" });
+    await updateScrapeSourceStatus(id, "error");
     return { success: false, chunks: 0 };
   }
 }
@@ -334,7 +331,7 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
     for (const source of due) {
       await scrapeSource(source);
       // Update lastScrapedAt
-      await updateScrapeSourceStatus(source.id, { lastScrapedAt: Date.now() });
+      await updateScrapeSourceStatus(source.id, "success");
     }
 
     const result = await scrapeAllSources();
@@ -351,4 +348,4 @@ export function stopScraperScheduler(): void {
 }
 
 // Export deduplication utilities for testing
-export { isContentDuplicate, hashContent, initializeDeduplicationCache };
+export { scrapeSource, isContentDuplicate, hashContent, initializeDeduplicationCache };

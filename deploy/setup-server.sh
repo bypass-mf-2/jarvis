@@ -1,152 +1,147 @@
 #!/bin/bash
 ###############################################################################
 #  JARVIS AI - Server Setup Script
-#  Run as root: sudo bash setup-server.sh
+#  Run as root from the project directory: sudo bash deploy/setup-server.sh
 #
-#  What this does:
-#    1. Installs Node.js, pnpm, Python, Ollama
-#    2. Creates a 'jarvis' system user
-#    3. Installs project deps
-#    4. Sets up systemd services (jarvis, chromadb, ollama)
-#    5. Enables everything to start on boot
-#
-#  After running: your server serves JARVIS on port 22770
+#  Installs all deps and sets up systemd services.
+#  After running: JARVIS serves on port 22770
 ###############################################################################
 
 set -e
 
-INSTALL_DIR="/opt/jarvis-ai"
+# Use the directory where the script lives (one level up from deploy/)
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=22770
-SERVICE_USER="jarvis"
 
 echo ""
 echo "  ========================================"
 echo "    JARVIS AI - Server Setup"
-echo "    Install dir: $INSTALL_DIR"
+echo "    Project dir: $PROJECT_DIR"
 echo "    Port: $PORT"
 echo "  ========================================"
 echo ""
 
-# ── Must be root ──────────────────────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: Run as root (sudo bash setup-server.sh)"
+    echo "ERROR: Run as root (sudo bash deploy/setup-server.sh)"
     exit 1
 fi
 
-# ── Install system dependencies ───────────────────────────────────────────────
-echo "[1/8] Installing system packages..."
+# ── [1/7] System packages ────────────────────────────────────────────────────
+echo "[1/7] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq curl git build-essential python3 python3-pip python3-venv
+apt-get install -y -qq curl git build-essential python3 python3-pip python3-venv python3-dev portaudio19-dev
 
-# ── Install Node.js 20 LTS ───────────────────────────────────────────────────
-echo "[2/8] Installing Node.js..."
-if ! command -v node &>/dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+# ── [2/7] Node.js 22 ────────────────────────────────────────────────────────
+echo "[2/7] Installing Node.js 22..."
+NODE_MAJOR=$(node --version 2>/dev/null | grep -oP '(?<=v)\d+' || echo "0")
+if [ "$NODE_MAJOR" -lt 22 ]; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     apt-get install -y -qq nodejs
 fi
 echo "  Node $(node --version)"
 
-# ── Install pnpm ─────────────────────────────────────────────────────────────
-echo "[3/8] Installing pnpm..."
+# ── [3/7] pnpm ──────────────────────────────────────────────────────────────
+echo "[3/7] Installing pnpm..."
 if ! command -v pnpm &>/dev/null; then
     npm install -g pnpm
 fi
 echo "  pnpm $(pnpm --version)"
 
-# ── Install Ollama ────────────────────────────────────────────────────────────
-echo "[4/8] Installing Ollama..."
+# ── [4/7] Ollama ────────────────────────────────────────────────────────────
+echo "[4/7] Installing Ollama..."
 if ! command -v ollama &>/dev/null; then
     curl -fsSL https://ollama.com/install.sh | sh
 fi
 
-# ── Create service user ──────────────────────────────────────────────────────
-echo "[5/8] Creating service user..."
-if ! id "$SERVICE_USER" &>/dev/null; then
-    useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
-fi
+# ── [5/7] Node dependencies ─────────────────────────────────────────────────
+echo "[5/7] Installing Node dependencies..."
+cd "$PROJECT_DIR"
+pnpm install
 
-# ── Set up project directory ──────────────────────────────────────────────────
-echo "[6/8] Setting up project directory..."
-if [ ! -d "$INSTALL_DIR" ]; then
-    mkdir -p "$INSTALL_DIR"
-fi
+# ── [6/7] Python venv + dependencies ────────────────────────────────────────
+echo "[6/7] Setting up Python virtual environment..."
+python3 -m venv "$PROJECT_DIR/.venv"
+"$PROJECT_DIR/.venv/bin/pip" install --upgrade pip -q
+"$PROJECT_DIR/.venv/bin/pip" install -r requirements.txt -q
+mkdir -p "$PROJECT_DIR/chroma-data"
 
-# Copy project files (run this from the project root)
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [ -f "$SCRIPT_DIR/package.json" ]; then
-    echo "  Copying project files..."
-    rsync -a --exclude='node_modules' --exclude='.git' --exclude='chroma-data' "$SCRIPT_DIR/" "$INSTALL_DIR/"
-fi
+# ── [7/7] systemd services ──────────────────────────────────────────────────
+echo "[7/7] Installing systemd services..."
 
-chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+# Write jarvis.service
+cat > /etc/systemd/system/jarvis.service << SVCEOF
+[Unit]
+Description=JARVIS AI Server
+After=network.target chromadb.service ollama.service
+Wants=chromadb.service ollama.service
 
-# ── Install dependencies ─────────────────────────────────────────────────────
-echo "[7/8] Installing dependencies..."
-cd "$INSTALL_DIR"
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PROJECT_DIR
+Environment=NODE_ENV=production
+Environment=PORT=$PORT
+Environment=HOME=/root
+EnvironmentFile=-$PROJECT_DIR/.env
+ExecStart=$PROJECT_DIR/node_modules/.bin/tsx start-jarvis.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis
 
-# Node deps (build scripts whitelisted in package.json pnpm.onlyBuiltDependencies)
-sudo -u "$SERVICE_USER" pnpm install
+[Install]
+WantedBy=multi-user.target
+SVCEOF
 
-# Python deps via venv (PEP 668 compliance)
-echo "  Setting up Python virtual environment..."
-python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install --upgrade pip -q
-"$INSTALL_DIR/.venv/bin/pip" install -r requirements.txt -q
-chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/.venv"
+# Write chromadb.service
+cat > /etc/systemd/system/chromadb.service << SVCEOF
+[Unit]
+Description=ChromaDB Vector Store
+After=network.target
 
-# Create chroma-data dir
-mkdir -p "$INSTALL_DIR/chroma-data"
-chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/chroma-data"
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PROJECT_DIR/.venv/bin/chroma run --path $PROJECT_DIR/chroma-data --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chromadb
 
-# ── Install systemd services ─────────────────────────────────────────────────
-echo "[8/8] Installing systemd services..."
+[Install]
+WantedBy=multi-user.target
+SVCEOF
 
-# Copy service files
-cp "$INSTALL_DIR/deploy/chromadb.service" /etc/systemd/system/
-cp "$INSTALL_DIR/deploy/jarvis.service" /etc/systemd/system/
-
-# Fix chroma path (prefer venv, fallback to system)
-CHROMA_PATH="$INSTALL_DIR/.venv/bin/chroma"
-if [ ! -f "$CHROMA_PATH" ]; then
-    CHROMA_PATH=$(which chroma 2>/dev/null || echo "/usr/local/bin/chroma")
-fi
-sed -i "s|/opt/jarvis-ai/.venv/bin/chroma|$CHROMA_PATH|g" /etc/systemd/system/chromadb.service
-
-# Fix pnpm path
-PNPM_PATH=$(which pnpm 2>/dev/null || echo "/usr/bin/pnpm")
-sed -i "s|/usr/bin/pnpm|$PNPM_PATH|g" /etc/systemd/system/jarvis.service
-
-# Reload and enable
 systemctl daemon-reload
 systemctl enable ollama chromadb jarvis
 systemctl start ollama
 sleep 2
 systemctl start chromadb
 sleep 2
-systemctl start jarvis
+systemctl restart jarvis
 
-# ── Open firewall port ────────────────────────────────────────────────────────
+# ── Firewall ─────────────────────────────────────────────────────────────────
 if command -v ufw &>/dev/null; then
     ufw allow $PORT/tcp
     echo "  Firewall: port $PORT opened"
 fi
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+# ── Done ─────────────────────────────────────────────────────────────────────
+SERVER_IP=$(hostname -I | awk '{print $1}')
 echo ""
 echo "  ========================================"
 echo "    JARVIS IS DEPLOYED"
 echo "  ========================================"
 echo ""
-echo "  Access:    http://YOUR_SERVER_IP:$PORT"
+echo "  Access: http://$SERVER_IP:$PORT"
 echo ""
 echo "  Commands:"
 echo "    systemctl status jarvis      # Check status"
 echo "    systemctl restart jarvis     # Restart"
-echo "    systemctl stop jarvis        # Stop"
 echo "    journalctl -u jarvis -f      # Live logs"
 echo ""
-echo "    systemctl status chromadb    # ChromaDB status"
-echo "    systemctl status ollama      # Ollama status"
-echo ""
-echo "  All 3 services start on boot automatically."
+echo "  All services start on boot automatically."
 echo ""
