@@ -84,9 +84,7 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 echo "[7/8] Installing dependencies..."
 cd "$INSTALL_DIR"
 
-# Node deps + approve native build scripts
-sudo -u "$SERVICE_USER" pnpm install
-sudo -u "$SERVICE_USER" pnpm approve-builds --allow @tailwindcss/oxide better-sqlite3 esbuild isolated-vm sharp tesseract.js
+# Node deps (build scripts whitelisted in package.json pnpm.onlyBuiltDependencies)
 sudo -u "$SERVICE_USER" pnpm install
 
 # Python deps via venv (PEP 668 compliance)
