@@ -83,8 +83,18 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 # ── Install dependencies ─────────────────────────────────────────────────────
 echo "[7/8] Installing dependencies..."
 cd "$INSTALL_DIR"
+
+# Node deps + approve native build scripts
 sudo -u "$SERVICE_USER" pnpm install
-pip3 install -r requirements.txt -q
+sudo -u "$SERVICE_USER" pnpm approve-builds --allow @tailwindcss/oxide better-sqlite3 esbuild isolated-vm sharp tesseract.js
+sudo -u "$SERVICE_USER" pnpm install
+
+# Python deps via venv (PEP 668 compliance)
+echo "  Setting up Python virtual environment..."
+python3 -m venv "$INSTALL_DIR/.venv"
+"$INSTALL_DIR/.venv/bin/pip" install --upgrade pip -q
+"$INSTALL_DIR/.venv/bin/pip" install -r requirements.txt -q
+chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/.venv"
 
 # Create chroma-data dir
 mkdir -p "$INSTALL_DIR/chroma-data"
@@ -97,9 +107,12 @@ echo "[8/8] Installing systemd services..."
 cp "$INSTALL_DIR/deploy/chromadb.service" /etc/systemd/system/
 cp "$INSTALL_DIR/deploy/jarvis.service" /etc/systemd/system/
 
-# Fix chroma path (might be in different location)
-CHROMA_PATH=$(which chroma 2>/dev/null || echo "/usr/local/bin/chroma")
-sed -i "s|/usr/local/bin/chroma|$CHROMA_PATH|g" /etc/systemd/system/chromadb.service
+# Fix chroma path (prefer venv, fallback to system)
+CHROMA_PATH="$INSTALL_DIR/.venv/bin/chroma"
+if [ ! -f "$CHROMA_PATH" ]; then
+    CHROMA_PATH=$(which chroma 2>/dev/null || echo "/usr/local/bin/chroma")
+fi
+sed -i "s|/opt/jarvis-ai/.venv/bin/chroma|$CHROMA_PATH|g" /etc/systemd/system/chromadb.service
 
 # Fix pnpm path
 PNPM_PATH=$(which pnpm 2>/dev/null || echo "/usr/bin/pnpm")
