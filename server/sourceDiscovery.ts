@@ -66,11 +66,21 @@ function getWorker(): Worker {
   return _worker;
 }
 
+function isValidUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Process messages from worker (DB writes happen here on main thread) ────────
 function handleWorkerMessage(msg: any): Promise<void> {
   return (async () => {
     switch (msg.type) {
       case "scraped-page": {
+        if (!msg.url || !isValidUrl(msg.url)) break;
         // Store all chunks
         for (const chunk of msg.chunks) {
           await addKnowledgeChunk({
@@ -92,6 +102,7 @@ function handleWorkerMessage(msg: any): Promise<void> {
         if (msg.discoveredLinks) {
           const domainQuality = await getDomainScore(msg.domain);
           for (const link of msg.discoveredLinks) {
+            if (!link.url || !isValidUrl(link.url)) continue;
             const alreadyQueued = await isFrontierUrl(link.url);
             if (!alreadyQueued) {
               const priority = 0.3 + domainQuality * 0.4 + Math.random() * 0.3;
@@ -103,6 +114,7 @@ function handleWorkerMessage(msg: any): Promise<void> {
       }
 
       case "frontier-add": {
+        if (!msg.url || !isValidUrl(msg.url)) break;
         const alreadyQueued = await isFrontierUrl(msg.url);
         if (!alreadyQueued) {
           await addToFrontier(msg.url, msg.domain, msg.depth, msg.priority, msg.discoveredFrom);
@@ -182,8 +194,13 @@ async function runDiscoveryCycle(): Promise<void> {
 
       const onMessage = async (msg: any) => {
         try {
-          // Handle DB writes for all data messages
-          await handleWorkerMessage(msg);
+          // Handle DB writes for all data messages (non-fatal if individual writes fail)
+          try {
+            await handleWorkerMessage(msg);
+          } catch (dbErr) {
+            // Don't kill the cycle over a single bad DB write
+            await logger.warn("sourceDiscovery", `DB write error (non-fatal): ${dbErr}`);
+          }
 
           // Phase transitions
           if (msg.type === "search-complete") {
