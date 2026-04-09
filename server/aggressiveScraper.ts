@@ -29,6 +29,16 @@ const FREE_PROXIES = [
   'http://103.168.52.52:1337',
   'http://196.219.202.74:8080',
   'http://103.83.118.10:55443',
+  'http://38.34.179.72:8452',
+    'http://38.34.179.53:8443',
+    'http://38.145.220.193:8446',
+    'http://38.145.220.96:8445',
+    'http://38.34.179.62:8453',
+    'http://38.34.179.192:8446',
+    'http://38.145.203.41:8453',
+    'http://38.34.179.194:8451',
+    'http://38.145.203.108:8452',
+    'http://38.34.179.179:8449'
   // Add more as you find them
   // Check https://www.proxy-list.download/HTTPS
 ];
@@ -154,7 +164,16 @@ const SCRAPER_NODES: ScraperNode[] = [
     rateLimit: 50,
     costPer1k: 10,          // $50 for 5000 = $10/1k
     priority: 2,
-    enabled: !!process.env.SERPAPI_KEY,
+    enabled: !!(process.env.EXPO_PUBLIC_SERPAPI_KEY || process.env.SERPAPI_KEY),
+  },
+  {
+    id: 'scrapingant',
+    type: 'api',
+    endpoint: 'https://api.scrapingant.com/v2/general',
+    rateLimit: 100,         // Generous limits
+    costPer1k: 4.9,         // ~$4.90 per 1000
+    priority: 2,
+    enabled: !!(process.env.EXPO_PUBLIC_SCRAPING_ANT_API_KEY || process.env.SCRAPING_ANT_API_KEY),
   },
   {
     id: 'bing-api',
@@ -302,12 +321,25 @@ class ScraperFleet {
 
   // ── Search via SerpAPI ───────────────────────────────────────────────────
   private async searchSerpAPI(query: string): Promise<any> {
+    const apiKey = process.env.EXPO_PUBLIC_SERPAPI_KEY || process.env.SERPAPI_KEY;
     const response = await fetch(
-      `https://serpapi.com/search?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}`
+      `https://serpapi.com/search?engine=google&q=${encodeURIComponent(query)}&api_key=${apiKey}`
     );
 
     if (!response.ok) throw new Error(`SerpAPI error: ${response.status}`);
     return response.json();
+  }
+
+  // ── Search via ScrapingAnt ──────────────────────────────────────────────
+  private async searchScrapingAnt(query: string): Promise<any> {
+    const apiKey = process.env.EXPO_PUBLIC_SCRAPING_ANT_API_KEY || process.env.SCRAPING_ANT_API_KEY;
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    const response = await fetch(
+      `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${apiKey}&browser=false`
+    );
+
+    if (!response.ok) throw new Error(`ScrapingAnt error: ${response.status}`);
+    return response.text();
   }
 
   // ── Search via Bing API ──────────────────────────────────────────────────
@@ -398,6 +430,8 @@ class ScraperFleet {
             results = await this.searchBraveAPI(query);
           } else if (node.id === 'serpapi') {
             results = await this.searchSerpAPI(query);
+          } else if (node.id === 'scrapingant') {
+            results = await this.searchScrapingAnt(query);
           } else if (node.id === 'bing-api') {
             results = await this.searchBingAPI(query);
           }

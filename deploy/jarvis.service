@@ -1,0 +1,27 @@
+[Unit]
+Description=JARVIS AI Server
+After=network.target chromadb.service ollama.service
+Wants=chromadb.service ollama.service
+
+[Service]
+Type=simple
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/jarvis-ai
+Environment=NODE_ENV=production
+Environment=PORT=22770
+EnvironmentFile=/opt/jarvis-ai/.env
+ExecStart=/usr/bin/pnpm dev
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/jarvis-ai
+
+[Install]
+WantedBy=multi-user.target
