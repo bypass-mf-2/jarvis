@@ -16,7 +16,7 @@ import * as path from "path";
 import { execSync } from "child_process";
 import { getDatabase, saveDatabase } from "./sqlite-init.js";
 import { logger } from "./logger.js";
-import { ollamaChatBackground as ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat, ollamaChatJson } from "./ollama.js";
 
 const USE_MYSQL = !!process.env.DATABASE_URL;
 
@@ -99,6 +99,172 @@ export async function collectTrainingExample(
     "autoTrain",
     `Collected training example (${userRating}⭐): ${userPrompt.slice(0, 50)}...`
   );
+}
+
+// ── Synthetic Training Data From Knowledge Chunks ──────────────────────────
+// Turns scraped knowledge chunks into {instruction, output} pairs by asking
+// the local LLM to generate a realistic Q/A grounded in each passage.
+// Chunks that have already been converted (chunkId present in training_examples)
+// are skipped so we don't re-train on the same source twice.
+
+type RawChunk = {
+  id: number;
+  sourceUrl: string | null;
+  sourceTitle: string | null;
+  sourceType: string | null;
+  content: string;
+};
+
+function parseQAJson(raw: string): { instruction: string; output: string } | null {
+  if (!raw) return null;
+
+  // Try direct parse first — when called via ollamaChatJson the model output
+  // is grammar-constrained so this should work cleanly. Fall back to regex
+  // extraction for any callers that don't use format=json.
+  const candidates: string[] = [raw];
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (match && match[0] !== raw) candidates.push(match[0]);
+
+  for (const candidate of candidates) {
+    try {
+      const obj = JSON.parse(candidate);
+      const instruction = typeof obj.instruction === "string" ? obj.instruction.trim() : "";
+      const output = typeof obj.output === "string" ? obj.output.trim() : "";
+      if (instruction.length >= 5 && output.length >= 20) {
+        return { instruction, output };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+async function generateQAFromChunk(
+  chunk: RawChunk,
+  model: string
+): Promise<{ instruction: string; output: string } | null> {
+  const sourceLabel = chunk.sourceTitle || chunk.sourceUrl || "an article";
+  const prompt = `You are generating training data for an AI assistant.
+
+Below is a passage from ${sourceLabel}. Create ONE realistic question a user might ask that this passage would answer, and the ideal answer grounded entirely in the passage. Do NOT invent facts outside the passage.
+
+Respond with STRICT JSON ONLY in this exact shape, no prose, no code fences:
+{"instruction": "...", "output": "..."}
+
+Passage:
+"""
+${chunk.content.slice(0, 3000)}
+"""`;
+
+  // ollamaChatJson sets format=json on the Ollama API, which grammar-constrains
+  // output to valid JSON. Without it, small models like llama3.2 routinely
+  // wrap responses in prose ("Here's the JSON:...") and every parse fails.
+  const raw = await ollamaChatJson([{ role: "user", content: prompt }], model);
+  const parsed = parseQAJson(raw);
+  if (!parsed) {
+    // Surface what the model actually returned so future regressions are
+    // visible instead of silently producing 0/N skipped batches.
+    await logger.warn(
+      "autoTrain",
+      `parseQAJson failed for chunk ${chunk.id}; raw response (first 200 chars): ${raw.slice(0, 200) || "<empty>"}`
+    );
+  }
+  return parsed;
+}
+
+export async function generateTrainingFromChunks(
+  limit = 50,
+  model = "llama3.2"
+): Promise<{ attempted: number; inserted: number; skipped: number }> {
+  await logger.info(
+    "autoTrain",
+    `Generating synthetic training data from up to ${limit} knowledge chunks`
+  );
+
+  // Pull chunks that haven't already been turned into training examples.
+  // Prefer chunks from higher-quality domains when the domain_scores table has data.
+  let rows: RawChunk[];
+  if (USE_MYSQL) {
+    // MySQL path: drizzle doesn't have all these tables wired, so do a raw query.
+    const { db } = await getDrizzle();
+    const result: any = await db.execute(
+      `SELECT kc.id, kc.sourceUrl, kc.sourceTitle, kc.sourceType, kc.content
+         FROM knowledge_chunks kc
+         LEFT JOIN training_examples te ON te.chunkId = kc.id
+        WHERE te.id IS NULL
+          AND LENGTH(kc.content) >= 200
+        ORDER BY kc.createdAt DESC
+        LIMIT ?`,
+      [limit]
+    );
+    rows = (result?.[0] ?? result ?? []) as RawChunk[];
+  } else {
+    rows = sqliteRun(
+      `SELECT kc.id, kc.sourceUrl, kc.sourceTitle, kc.sourceType, kc.content
+         FROM knowledge_chunks kc
+         LEFT JOIN training_examples te ON te.chunkId = kc.id
+        WHERE te.id IS NULL
+          AND LENGTH(kc.content) >= 200
+        ORDER BY kc.createdAt DESC
+        LIMIT ?`,
+      [limit]
+    ) as RawChunk[];
+  }
+
+  if (rows.length === 0) {
+    await logger.info("autoTrain", "No new knowledge chunks to convert");
+    return { attempted: 0, inserted: 0, skipped: 0 };
+  }
+
+  let inserted = 0;
+  let skipped = 0;
+
+  for (const chunk of rows) {
+    try {
+      const qa = await generateQAFromChunk(chunk, model);
+      if (!qa) {
+        skipped++;
+        continue;
+      }
+
+      const category = detectCategory(qa.instruction + " " + (chunk.sourceTitle ?? ""));
+      // Synthetic examples are pinned at rating=4: good enough to feed training,
+      // but distinguishable from genuine 5-star user feedback.
+      const SYNTH_RATING = 4;
+
+      if (USE_MYSQL) {
+        const { db, schema } = await getDrizzle();
+        await db.insert(schema.trainingExamples).values({
+          conversationId: null,
+          chunkId: chunk.id,
+          source: "synthetic",
+          instruction: qa.instruction,
+          output: qa.output,
+          rating: SYNTH_RATING,
+          category,
+          createdAt: new Date(),
+        });
+      } else {
+        sqliteInsert(
+          `INSERT INTO training_examples
+             (conversationId, chunkId, source, instruction, output, rating, category, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [null, chunk.id, "synthetic", qa.instruction, qa.output, SYNTH_RATING, category, Date.now()]
+        );
+      }
+      inserted++;
+    } catch (err) {
+      skipped++;
+      await logger.warn("autoTrain", `Failed to convert chunk ${chunk.id}: ${err}`);
+    }
+  }
+
+  await logger.info(
+    "autoTrain",
+    `Synthetic training generation complete: ${inserted} inserted, ${skipped} skipped of ${rows.length} attempted`
+  );
+  return { attempted: rows.length, inserted, skipped };
 }
 
 function detectCategory(prompt: string): "ios" | "web" | "data" | "general" {
@@ -318,6 +484,14 @@ export async function weeklyModelUpdate(): Promise<void> {
   await logger.info("autoTrain", "🔄 Starting weekly model update");
 
   try {
+    // Before the gate, convert any fresh knowledge chunks into synthetic training
+    // examples. This lets newly scraped sources feed the pipeline automatically.
+    try {
+      await generateTrainingFromChunks(50);
+    } catch (err) {
+      await logger.warn("autoTrain", `Synthetic chunk generation failed (non-fatal): ${err}`);
+    }
+
     let exampleCount: number;
     if (USE_MYSQL) {
       const { db, schema, orm } = await getDrizzle();

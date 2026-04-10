@@ -63,12 +63,15 @@ export async function listOllamaModels(): Promise<string[]> {
 async function _rawOllamaChat(
   messages: OllamaMessage[],
   model: string,
-  timeoutMs: number
+  timeoutMs: number,
+  format?: "json"
 ): Promise<string> {
+  const body: Record<string, unknown> = { model, messages, stream: false };
+  if (format) body.format = format;
   const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, stream: false }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`Ollama error: ${res.status}`);
@@ -107,6 +110,24 @@ export async function ollamaChat(
   // Fallback: built-in Forge LLM
   const response = await invokeLLM({ messages });
   return (response as any)?.choices?.[0]?.message?.content ?? "";
+}
+
+// ── Structured chat (forces valid JSON via Ollama's format=json grammar) ────
+// Use this when the caller needs to JSON.parse() the response. Without
+// format=json, small models commonly wrap output in prose or code fences.
+// Runs at priority 1 (background) so it can't starve user-facing chat.
+export async function ollamaChatJson(
+  messages: OllamaMessage[],
+  model: string = DEFAULT_MODEL
+): Promise<string> {
+  const ollamaUp = await isOllamaAvailable();
+  if (!ollamaUp) return "";
+  try {
+    return await enqueueOllama(1, () => _rawOllamaChat(messages, model, 60_000, "json"));
+  } catch (err) {
+    console.warn("[Ollama] JSON chat failed:", err);
+    return "";
+  }
 }
 
 // ── Background chat (priority 1 — memory extraction, model routing) ──────────
