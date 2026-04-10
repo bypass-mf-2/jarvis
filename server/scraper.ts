@@ -13,7 +13,16 @@ import {
   addKnowledgeChunk,
   updateScrapeSourceStatus,
   getKnowledgeChunks,
+  incrementConsecutiveZeroScrapes,
+  resetConsecutiveZeroScrapes,
+  toggleScrapeSource,
 } from "./db";
+
+// Auto-disable a source after this many consecutive scrapes that returned
+// zero parseable items. "Zero items" specifically means the feed/page
+// couldn't be parsed at all — NOT "items found but all duplicates", which
+// is normal behavior for healthy RSS feeds with no new posts.
+const ZERO_SCRAPE_DISABLE_THRESHOLD = 5;
 import { addToVectorStore } from "./vectorStore";
 import { logger } from "./logger";
 import { fetchWithRetry } from "./webSearch";
@@ -259,6 +268,25 @@ async function storeChunks(
   return stored;
 }
 
+// Auto-disable policy: a "broken" scrape is one where the source produced
+// no parseable items at all (e.g., HTML page treated as RSS, dead URL).
+// A scrape that parses items but stores 0 chunks (because every chunk was
+// already in the cache) is HEALTHY and resets the counter.
+async function recordScrapeHealth(id: number, name: string, isBroken: boolean): Promise<void> {
+  if (!isBroken) {
+    await resetConsecutiveZeroScrapes(id);
+    return;
+  }
+  const newCount = await incrementConsecutiveZeroScrapes(id);
+  if (newCount >= ZERO_SCRAPE_DISABLE_THRESHOLD) {
+    await toggleScrapeSource(id, false);
+    await logger.warn(
+      "scraper",
+      `Auto-disabled "${name}" after ${newCount} consecutive failed scrapes — re-enable manually if this was a transient issue`
+    );
+  }
+}
+
 // ── Scrape single source ──────────────────────────────────────────────────────
 async function scrapeSource(source: any): Promise<{ success: boolean; chunks: number }> {
   const { id, name, url, type } = source;
@@ -267,9 +295,11 @@ async function scrapeSource(source: any): Promise<{ success: boolean; chunks: nu
     await logger.info("scraper", `Scraping source: ${name} (${url})`);
 
     let totalChunks = 0;
+    let itemsParsed = 0;
 
     if (type === "rss") {
       const items = await scrapeRSS(url);
+      itemsParsed = items.length;
       for (const item of items) {
         const combined = `${item.title}\n\n${item.content}`;
         const stored = await storeChunks(id, url, name, "rss", combined, item.title);
@@ -277,16 +307,19 @@ async function scrapeSource(source: any): Promise<{ success: boolean; chunks: nu
       }
     } else if (type === "custom_url") {
       const { title, content } = await scrapeURL(url);
+      itemsParsed = content && content.trim().length > 0 ? 1 : 0;
       totalChunks = await storeChunks(id, url, name, "custom_url", content, title);
     }
 
     await updateScrapeSourceStatus(id, "success", undefined, totalChunks);
+    await recordScrapeHealth(id, name, itemsParsed === 0);
     await logger.info("scraper", `Scraped ${totalChunks} chunks from ${name}`);
 
     return { success: true, chunks: totalChunks };
   } catch (err) {
     await logger.error("scraper", `Failed to scrape ${name}: ${err}`);
     await updateScrapeSourceStatus(id, "error");
+    await recordScrapeHealth(id, name, true);
     return { success: false, chunks: 0 };
   }
 }
@@ -298,6 +331,7 @@ export async function scrapeAllSources(): Promise<{ succeeded: number; failed: n
   let failed = 0;
 
   for (const source of sources) {
+    if (source.isActive === false || source.isActive === 0) continue;
     const result = await scrapeSource(source);
     if (result.success) succeeded++;
     else failed++;
@@ -309,6 +343,20 @@ export async function scrapeAllSources(): Promise<{ succeeded: number; failed: n
 // ── Scheduler ──────────────────────────────────────────────────────────────────
 let _schedulerInterval: NodeJS.Timeout | null = null;
 let _scraperRunning = false;
+let _scraperEnabled = true;
+
+// Global enable/disable — gates the scheduler tick. Manual scrapeSource/
+// scrapeAllSources calls are intentionally left alone so the user can still
+// trigger one-off scrapes while background scraping is paused.
+export function isScraperEnabled(): boolean {
+  return _scraperEnabled;
+}
+
+export function setScraperEnabled(enabled: boolean): void {
+  if (_scraperEnabled === enabled) return;
+  _scraperEnabled = enabled;
+  logger.info("scraper", `Scraper ${enabled ? "enabled" : "disabled"} via global toggle`);
+}
 
 export function startScraperScheduler(intervalMs: number = 60_000): void {
   if (_schedulerInterval) {
@@ -318,6 +366,8 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
   logger.info("scraper", `Scraper scheduler started (checking every ${intervalMs / 1000}s)`);
 
   _schedulerInterval = setInterval(async () => {
+    // Global pause — skip entire tick while scraping is disabled.
+    if (!_scraperEnabled) return;
     // Skip this tick if a previous tick is still running — prevents pile-up
     // when sources are slow or numerous.
     if (_scraperRunning) return;
@@ -327,6 +377,9 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
       const sources = await getScrapeSources();
       const now = Date.now();
       const due = sources.filter((s: any) => {
+        // Skip inactive sources — including ones the auto-disable policy
+        // turned off after repeated failures.
+        if (s.isActive === false || s.isActive === 0) return false;
         if (!s.lastScrapedAt) return true;
         const nextScrape = s.lastScrapedAt + (s.intervalMinutes || 60) * 60_000;
         return now >= nextScrape;

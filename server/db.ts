@@ -236,6 +236,49 @@ export async function deleteKnowledgeChunk(id: number) {
   sqliteRun("DELETE FROM knowledge_chunks WHERE id = ?", [id]);
 }
 
+// ── Uploaded file helpers ─────────────────────────────────────────────────────
+// Counts chunks per uploaded file (sourceUrl starts with file://)
+export async function getUploadedFileChunkCounts(): Promise<Record<string, number>> {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const rows = await db
+      .select({
+        sourceUrl: schema.knowledgeChunks.sourceUrl,
+        count: orm.sql<number>`COUNT(*)`,
+      })
+      .from(schema.knowledgeChunks)
+      .where(orm.like(schema.knowledgeChunks.sourceUrl, "file://%"))
+      .groupBy(schema.knowledgeChunks.sourceUrl);
+    const out: Record<string, number> = {};
+    for (const r of rows as any[]) out[r.sourceUrl] = Number(r.count);
+    return out;
+  }
+  const rows = sqliteRun(
+    "SELECT sourceUrl, COUNT(*) as count FROM knowledge_chunks WHERE sourceUrl LIKE 'file://%' GROUP BY sourceUrl"
+  );
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.sourceUrl] = Number(r.count);
+  return out;
+}
+
+// Deletes all knowledge chunks for a given uploaded file (by sourceUrl)
+export async function deleteChunksByFileUrl(sourceUrl: string): Promise<number> {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const result = await db
+      .delete(schema.knowledgeChunks)
+      .where(orm.eq(schema.knowledgeChunks.sourceUrl, sourceUrl));
+    return Number((result as any)[0]?.affectedRows ?? 0);
+  }
+  const before = sqliteRun(
+    "SELECT COUNT(*) as count FROM knowledge_chunks WHERE sourceUrl = ?",
+    [sourceUrl]
+  );
+  const count = Number(before[0]?.count ?? 0);
+  sqliteRun("DELETE FROM knowledge_chunks WHERE sourceUrl = ?", [sourceUrl]);
+  return count;
+}
+
 // ── Scrape Sources ───────────────────────────────────────────────────────────
 export async function addScrapeSource(data: any) {
   if (USE_MYSQL) {
@@ -296,6 +339,44 @@ export async function deleteScrapeSource(id: number) {
     return;
   }
   sqliteRun("DELETE FROM scrape_sources WHERE id = ?", [id]);
+}
+
+// Increments the consecutive failed scrape counter for a source and returns
+// the new count. Used by the scraper's auto-disable policy.
+export async function incrementConsecutiveZeroScrapes(id: number): Promise<number> {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    await db.update(schema.scrapeSources)
+      .set({ consecutiveZeroScrapes: orm.sql`consecutiveZeroScrapes + 1` })
+      .where(orm.eq(schema.scrapeSources.id, id));
+    const rows = await db.select({ n: schema.scrapeSources.consecutiveZeroScrapes })
+      .from(schema.scrapeSources)
+      .where(orm.eq(schema.scrapeSources.id, id))
+      .limit(1);
+    return rows[0]?.n ?? 0;
+  }
+  sqliteRun(
+    "UPDATE scrape_sources SET consecutiveZeroScrapes = consecutiveZeroScrapes + 1, updatedAt = ? WHERE id = ?",
+    [Date.now(), id]
+  );
+  const rows = sqliteRun("SELECT consecutiveZeroScrapes FROM scrape_sources WHERE id = ?", [id]);
+  return rows[0]?.consecutiveZeroScrapes ?? 0;
+}
+
+// Resets the consecutive failed scrape counter back to 0. Called after a
+// healthy scrape (any items parsed, even if all chunks were duplicates).
+export async function resetConsecutiveZeroScrapes(id: number): Promise<void> {
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    await db.update(schema.scrapeSources)
+      .set({ consecutiveZeroScrapes: 0 })
+      .where(orm.eq(schema.scrapeSources.id, id));
+    return;
+  }
+  sqliteRun(
+    "UPDATE scrape_sources SET consecutiveZeroScrapes = 0, updatedAt = ? WHERE id = ?",
+    [Date.now(), id]
+  );
 }
 
 // ── System Logs ──────────────────────────────────────────────────────────────

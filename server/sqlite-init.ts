@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS scrape_sources (
   lastStatus TEXT DEFAULT 'pending',
   lastError TEXT,
   totalChunks INTEGER DEFAULT 0,
+  consecutiveZeroScrapes INTEGER NOT NULL DEFAULT 0,
   createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
   updatedAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
 );
@@ -213,6 +214,8 @@ CREATE TABLE IF NOT EXISTS learning_sessions (
 CREATE TABLE IF NOT EXISTS training_examples (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   conversationId INTEGER,
+  chunkId INTEGER,
+  source TEXT DEFAULT 'chat',
   instruction TEXT NOT NULL,
   output TEXT NOT NULL,
   rating INTEGER NOT NULL,
@@ -322,6 +325,7 @@ export async function initializeSQLiteDatabase(): Promise<SqlJsDatabase> {
     // Initialize schema
     if (_db) {
       _db.run(SCHEMA_SQL);
+      runPendingMigrations(_db);
       // Save to disk
       saveDatabase();
       console.log(`✅ SQLite database initialized at: ${DB_PATH}`);
@@ -332,6 +336,31 @@ export async function initializeSQLiteDatabase(): Promise<SqlJsDatabase> {
     console.error("❌ Failed to initialize SQLite database:", error);
     throw error;
   }
+}
+
+// ── Idempotent migrations ───────────────────────────────────────────────────
+// SQLite doesn't support "ALTER TABLE ADD COLUMN IF NOT EXISTS", so we
+// inspect PRAGMA table_info and add only missing columns.
+function runPendingMigrations(db: SqlJsDatabase): void {
+  const ensureColumn = (table: string, column: string, definition: string) => {
+    const existing = db.exec(`PRAGMA table_info(${table})`);
+    const cols = existing[0]?.values.map((row: any[]) => row[1] as string) ?? [];
+    if (!cols.includes(column)) {
+      try {
+        db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        console.log(`📦 migration: added ${table}.${column}`);
+      } catch (err) {
+        console.warn(`⚠️  migration skipped for ${table}.${column}:`, err);
+      }
+    }
+  };
+
+  // training_examples: track origin + which chunk the example was derived from
+  ensureColumn("training_examples", "chunkId", "INTEGER");
+  ensureColumn("training_examples", "source", "TEXT DEFAULT 'chat'");
+
+  // scrape_sources: track consecutive failed scrapes for auto-disable
+  ensureColumn("scrape_sources", "consecutiveZeroScrapes", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function getDatabase(): SqlJsDatabase {

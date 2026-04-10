@@ -87,6 +87,7 @@ export const scrapeSources = mysqlTable("scrape_sources", {
   lastStatus: mysqlEnum("lastStatus", ["success", "error", "pending"]).default("pending"),
   lastError: text("lastError"),
   totalChunks: int("totalChunks").default(0),
+  consecutiveZeroScrapes: int("consecutiveZeroScrapes").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -242,6 +243,8 @@ export const learningSessions = mysqlTable("learning_sessions", {
 export const trainingExamples = mysqlTable("training_examples", {
   id: int("id").autoincrement().primaryKey(),
   conversationId: int("conversationId"),
+  chunkId: int("chunkId"), // set for examples derived from knowledge_chunks
+  source: varchar("source", { length: 16 }).default("chat"), // 'chat' | 'synthetic'
   instruction: text("instruction").notNull(),
   output: text("output").notNull(),
   rating: int("rating").notNull(), // 1-5 stars
