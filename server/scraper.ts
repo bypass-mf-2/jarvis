@@ -16,6 +16,7 @@ import {
 } from "./db";
 import { addToVectorStore } from "./vectorStore";
 import { logger } from "./logger";
+import { fetchWithRetry } from "./webSearch";
 
 // ── Content Deduplication Cache ─────────────────────────────────────────────
 // Track content hashes to prevent duplicate scraping from same source
@@ -45,7 +46,9 @@ async function isContentDuplicate(sourceUrl: string, content: string): Promise<b
   // If cache is full, clear oldest entries
   if (sourceCache.size >= MAX_CACHE_SIZE) {
     const firstHash = sourceCache.values().next().value;
-    sourceCache.delete(firstHash);
+    if (firstHash !== undefined) {
+      sourceCache.delete(firstHash);
+    }
   }
   
   // Add to cache for future checks
@@ -76,8 +79,8 @@ async function initializeDeduplicationCache(): Promise<void> {
   }
 }
 
-// Initialize cache on module load
-initializeDeduplicationCache();
+// Cache is initialized from services.ts after SQLite is ready (do NOT call here —
+// this module is imported before initializeSQLiteDatabase() finishes).
 
 // ── Text utilities ────────────────────────────────────────────────────────────
 function stripHtml(html: string): string {
@@ -107,7 +110,7 @@ function chunkText(text: string, maxChars = 800): string[] {
 
 // ── RSS Feed scraper ──────────────────────────────────────────────────────────
 async function scrapeRSS(url: string): Promise<Array<{ title: string; content: string; link: string }>> {
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { "User-Agent": "JarvisAI/1.0 RSS Reader" },
     signal: AbortSignal.timeout(15_000),
   });
@@ -138,7 +141,7 @@ async function scrapeRSS(url: string): Promise<Array<{ title: string; content: s
 
 // ── Generic URL scraper ───────────────────────────────────────────────────────
 async function scrapeURL(url: string): Promise<{ title: string; content: string }> {
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -305,6 +308,7 @@ export async function scrapeAllSources(): Promise<{ succeeded: number; failed: n
 
 // ── Scheduler ──────────────────────────────────────────────────────────────────
 let _schedulerInterval: NodeJS.Timeout | null = null;
+let _scraperRunning = false;
 
 export function startScraperScheduler(intervalMs: number = 60_000): void {
   if (_schedulerInterval) {
@@ -314,28 +318,33 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
   logger.info("scraper", `Scraper scheduler started (checking every ${intervalMs / 1000}s)`);
 
   _schedulerInterval = setInterval(async () => {
-    const sources = await getScrapeSources();
-    const now = Date.now();
-    const due = sources.filter((s: any) => {
-      if (!s.lastScrapedAt) return true;
-      const nextScrape = s.lastScrapedAt + (s.intervalMinutes || 60) * 60_000;
-      return now >= nextScrape;
-    });
+    // Skip this tick if a previous tick is still running — prevents pile-up
+    // when sources are slow or numerous.
+    if (_scraperRunning) return;
+    _scraperRunning = true;
 
-    if (due.length === 0) {
-      return;
+    try {
+      const sources = await getScrapeSources();
+      const now = Date.now();
+      const due = sources.filter((s: any) => {
+        if (!s.lastScrapedAt) return true;
+        const nextScrape = s.lastScrapedAt + (s.intervalMinutes || 60) * 60_000;
+        return now >= nextScrape;
+      });
+
+      if (due.length === 0) return;
+
+      await logger.info("scraper", `Scraping ${due.length} due sources (${sources.length - due.length} not yet due)`);
+
+      // scrapeSource() already calls updateScrapeSourceStatus() with the real
+      // success/error result. Do NOT overwrite it here, and do NOT additionally
+      // re-scrape every source via scrapeAllSources() — that was a double-scrape bug.
+      for (const source of due) {
+        await scrapeSource(source);
+      }
+    } finally {
+      _scraperRunning = false;
     }
-
-    await logger.info("scraper", `Scraping ${due.length} due sources (${sources.length - due.length} not yet due)`);
-
-    for (const source of due) {
-      await scrapeSource(source);
-      // Update lastScrapedAt
-      await updateScrapeSourceStatus(source.id, "success");
-    }
-
-    const result = await scrapeAllSources();
-    await logger.info("scraper", `Scrape complete: ${result.succeeded} succeeded, ${result.failed} failed`);
   }, intervalMs);
 }
 

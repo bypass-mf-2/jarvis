@@ -5,15 +5,43 @@
 import { logger } from "./logger.js";
 import { aggressiveSearch, aggressiveBatchSearch } from "./aggressiveScraper.js";
 
+// ── fetch with retry/backoff ─────────────────────────────────────────────
+// Used by scraper.ts and fetchPageContent below. Retries on transient
+// network errors and 5xx, but NOT on 4xx (those are real "don't try again"
+// responses). Backoff: 500ms, 1s, 2s.
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  attempts = 3
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, init);
+      // 4xx is final — don't waste retries on a permanent client error.
+      if (res.ok || (res.status >= 400 && res.status < 500)) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      lastErr = e;
+    }
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 500 * 2 ** i));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 // ── Main Search Function ─────────────────────────────────────────────────
 export async function searchWeb(
-  query: string
+  query: string,
+  limit?: number
 ): Promise<Array<{ title: string; url: string; snippet: string }>> {
   await logger.info("webSearch", `Web search: ${query}`);
 
   try {
     const result = await aggressiveSearch(query);
-    return parseResults(result.results, result.node);
+    const parsed = parseResults(result.results, result.node);
+    return typeof limit === "number" ? parsed.slice(0, limit) : parsed;
   } catch (err) {
     await logger.error("webSearch", `Search failed: ${err}`);
     return [];
@@ -91,7 +119,7 @@ export async function fetchPageContent(url: string): Promise<string> {
   await logger.info("webSearch", `Fetching page: ${url.slice(0, 50)}...`);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

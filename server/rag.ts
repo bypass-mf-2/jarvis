@@ -68,7 +68,10 @@ You can use this to understand the chronological order of events and calculate t
   for (const chunk of ragChunks) {
     try {
       if (chunk.metadata?.id) {
-        await recordChunkRetrieval(chunk.metadata.id);
+        const chunkId = Number(chunk.metadata.id);
+        if (Number.isFinite(chunkId)) {
+          await recordChunkRetrieval(chunkId);
+        }
       }
       if (chunk.metadata?.sourceUrl) {
         const domain = new URL(chunk.metadata.sourceUrl).hostname;

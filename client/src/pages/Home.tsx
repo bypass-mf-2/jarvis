@@ -6,6 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 import {
@@ -14,7 +16,7 @@ import {
   MessageSquare, Database, Rss, Settings, Activity,
   RefreshCw, CheckCircle, XCircle, Clock, AlertTriangle,
   Bot, User, Loader2, StopCircle,
-  Upload
+  Upload, BarChart3
 } from "lucide-react";
 import { FileUploadPanel } from "@/components/FileUploadPanel";
 import { MessageRating, TrainingDashboard } from "@/components/TrainingComponents";
@@ -25,7 +27,14 @@ type Message = {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: Date;
-  ragChunksUsed?: { id: string; source: string; distance: number }[] | null;
+  ragChunksUsed?: {
+    id: string;
+    source: string;
+    url?: string | null;
+    title?: string | null;
+    sourceType?: string | null;
+    distance: number;
+  }[] | null;
   userRating?: number | null;
 };
 
@@ -36,7 +45,18 @@ type Conversation = {
   createdAt: Date;
 };
 
-type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "upload" | "training";
+type SidePanel = "chat" | "knowledge" | "scraper" | "improvement" | "logs" | "upload" | "training" | "benchmarks";
+
+// ── AI Landscape Reference Data ───────────────────────────────────────────────
+// Public benchmark scores (MMLU, approximate published values).
+// Update these when new model results are released.
+const AI_LANDSCAPE: { name: string; mmlu: number; humanEval: number }[] = [
+  { name: "Claude Sonnet 4.5", mmlu: 88, humanEval: 92 },
+  { name: "Claude Opus 4.6",   mmlu: 90, humanEval: 94 },
+  { name: "GPT-4o",            mmlu: 88, humanEval: 90 },
+  { name: "Gemini 2.5 Pro",    mmlu: 86, humanEval: 87 },
+  { name: "Llama 3.1 70B",     mmlu: 83, humanEval: 80 },
+];
 
 // ── Status Dot ────────────────────────────────────────────────────────────────
 function StatusDot({ ok }: { ok: boolean }) {
@@ -82,10 +102,7 @@ export default function Home() {
     { limit: 30, offset: 0 },
     { enabled: sidePanel === "knowledge" }
   );
-  const { data: scraperSources, refetch: refetchSources } = trpc.scraper.listSources.useQuery(
-    undefined,
-    { enabled: sidePanel === "scraper" }
-  );
+  const { data: scraperSources, refetch: refetchSources } = trpc.scraper.listSources.useQuery();
   const { data: patches, refetch: refetchPatches } = trpc.selfImprovement.listPatches.useQuery(
     undefined,
     { enabled: sidePanel === "improvement" }
@@ -166,140 +183,28 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [convData?.messages, streamedResponse]);
 
-  // Add a new side panel option
-// For Knowledge Panel (around line 600):
-{sidePanel === "knowledge" && (
-  <>
-    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setSidePanel("chat")}
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <Database className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">Knowledge Base</span>
-      </div>
-      <Badge variant="secondary" className="text-xs">
-        {status?.knowledge?.totalChunks ?? 0} chunks
-      </Badge>
-    </div>
-    {/* rest of knowledge panel */}
-  </>
-)}
+  // ── Attached files for chat input ────────────────────────────────────────────
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
 
-// For Scraper Panel (around line 650):
-{sidePanel === "scraper" && (
-  <>
-    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setSidePanel("chat")}
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <Rss className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">Web Scraper</span>
-      </div>
-      <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
-        onClick={() => scrapeNow.mutate({})} disabled={scrapeNow.isPending}>
-        <RefreshCw className={`w-3 h-3 ${scrapeNow.isPending ? "animate-spin" : ""}`} />
-        Scrape All
-      </Button>
-    </div>
-    {/* rest of scraper panel */}
-  </>
-)}
-
-// For Self-Improvement Panel (around line 710):
-{sidePanel === "improvement" && (
-  <>
-    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setSidePanel("chat")}
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <Zap className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">Self-Improvement</span>
-      </div>
-      {/* rest of header */}
-    </div>
-    {/* rest of improvement panel */}
-  </>
-)}
-
-// For Logs Panel (around line 770):
-{sidePanel === "logs" && (
-  <>
-    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setSidePanel("chat")}
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <Activity className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">System Logs</span>
-      </div>
-    </div>
-    {/* rest of logs panel */}
-  </>
-)}
-
-// Add Upload Panel (add this new section around line 800):
-{sidePanel === "upload" && (
-  <>
-    <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setSidePanel("chat")}
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <Upload className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">File Upload</span>
-      </div>
-    </div>
-    <FileUploadPanel />
-  </>
-)}
-
-// In panel rendering:
-{sidePanel === "training" && (
-  <TrainingDashboard />
-)}
-
-// Add button to toolbar:
-<Tooltip>
-  <TooltipTrigger asChild>
-    <Button
-      variant="ghost"
-      size="icon"
-      className={`h-8 w-8 ${sidePanel === "training" ? "text-primary" : ""}`}
-      onClick={() => setSidePanel("training")}
-    >
-      <Brain className="w-4 h-4" />
-    </Button>
-  </TooltipTrigger>
-  <TooltipContent>Training Dashboard</TooltipContent>
-</Tooltip>
+  const uploadAttachedFiles = useCallback(async (files: File[]): Promise<string[]> => {
+    const summaries: string[] = [];
+    for (const file of files) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/upload", { method: "POST", body: fd });
+        if (res.ok) {
+          summaries.push(`📎 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+        } else {
+          summaries.push(`⚠️ Failed to attach ${file.name}`);
+        }
+      } catch {
+        summaries.push(`⚠️ Failed to attach ${file.name}`);
+      }
+    }
+    return summaries;
+  }, []);
 
   // ── Send message ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -307,26 +212,32 @@ export default function Home() {
   }, [isSending]);
 
   const handleSend = useCallback(async () => {
-  if (!input.trim() || isSendingRef.current) return;
+  if ((!input.trim() && attachedFiles.length === 0) || isSendingRef.current) return;
 
   let convId = activeConvId;
-  
-  // If no active conversation, create one
+
   if (!convId) {
     const conv = await createConv.mutateAsync({});
     convId = conv?.id ?? null;
     if (!convId) return;
-    
-    // ✅ ADD THESE TWO LINES:
     setActiveConvId(convId);
     await new Promise(r => setTimeout(r, 100));
   }
 
-  const text = input.trim();
-  setInput("");
   setIsSending(true);
 
-  const payload = { conversationId: convId, content: text };
+  // Upload any attached files first and append summaries to the message
+  let messageText = input.trim();
+  if (attachedFiles.length > 0) {
+    const summaries = await uploadAttachedFiles(attachedFiles);
+    const filesNote = `\n\n[Attached files added to knowledge base:]\n${summaries.join("\n")}`;
+    messageText = messageText ? messageText + filesNote : filesNote;
+    setAttachedFiles([]);
+  }
+
+  setInput("");
+
+  const payload = { conversationId: convId, content: messageText };
   setLastFailedMessage(payload);
 
   sendMessage.mutate(payload, {
@@ -340,11 +251,10 @@ export default function Home() {
       },
       onError: () => {
         setIsSending(false);
-        // lastFailedMessage stays set so user can retry
       },
     }
   );
-}, [input, activeConvId, voiceEnabled, refetchMessages]);
+}, [input, attachedFiles, activeConvId, voiceEnabled, refetchMessages, uploadAttachedFiles]);
 
   const handleRetry = useCallback(() => {
     if (!lastFailedMessage || isSending) return;
@@ -504,10 +414,88 @@ export default function Home() {
             <span className="text-muted-foreground">Knowledge</span>
             <span className="text-primary font-mono">{status?.knowledge?.totalChunks ?? 0} chunks</span>
           </div>
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-muted-foreground">Sources</span>
-            <span className="text-primary font-mono">{status?.scraper?.activeSources ?? 0} active</span>
-          </div>
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="w-full flex items-center justify-between text-xs rounded-md px-1 -mx-1 py-0.5 hover:bg-secondary/60 transition-colors cursor-pointer"
+              >
+                <span className="text-muted-foreground group-hover:text-foreground">Sources</span>
+                <span className="text-primary font-mono hover:underline">
+                  {status?.scraper?.activeSources ?? 0} active
+                </span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              side="right"
+              className="w-96 max-h-[70vh] overflow-y-auto p-3"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                  <Rss className="w-3 h-3 text-primary" />
+                  Scrape Sources
+                  <Badge variant="outline" className="text-[10px]">
+                    {(scraperSources ?? []).length}
+                  </Badge>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setSidePanel("scraper")}
+                  className="text-[10px] text-primary hover:underline"
+                >
+                  Manage →
+                </button>
+              </div>
+              {(scraperSources ?? []).length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">
+                  No sources configured yet.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {(scraperSources ?? []).map((source: any) => (
+                    <div
+                      key={source.id}
+                      className="p-2 rounded-md border border-border bg-card text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <StatusDot ok={source.isActive} />
+                            <span className="font-medium text-foreground truncate">
+                              {source.name}
+                            </span>
+                          </div>
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-primary hover:underline break-all block"
+                          >
+                            {source.url}
+                          </a>
+                        </div>
+                        <Badge variant="outline" className="text-[10px] flex-shrink-0">
+                          {source.type}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground font-mono">
+                        <span>{source.totalChunks ?? 0} chunks</span>
+                        {source.lastScraped && (
+                          <span>
+                            • last {new Date(source.lastScraped).toLocaleDateString()}
+                          </span>
+                        )}
+                        {source.lastStatus === "error" && (
+                          <span className="text-red-400">• error</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </PopoverContent>
+          </Popover>
         </div>
       </aside>
 
@@ -536,6 +524,7 @@ export default function Home() {
               { id: "knowledge", icon: Database, label: "Knowledge" },
               { id: "scraper", icon: Rss, label: "Scraper" },
               { id: "improvement", icon: Zap, label: "Self-Improve" },
+              { id: "benchmarks", icon: BarChart3, label: "Benchmarks" },
               { id: "logs", icon: Activity, label: "Logs" },
             ] as const).map(({ id, icon: Icon, label }) => (
               <Tooltip key={id}>
@@ -632,6 +621,37 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+
+              {/* AI Landscape preview — links to full Benchmarks panel */}
+              <div className="w-full max-w-sm rounded-lg p-3"
+                style={{ background: "oklch(0.12 0.018 240)", border: "1px solid oklch(0.22 0.03 230)" }}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <BarChart3 className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+                      AI Landscape · MMLU
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setSidePanel("benchmarks")}
+                    className="text-[10px] text-muted-foreground hover:text-primary transition-colors"
+                  >
+                    View all →
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  {AI_LANDSCAPE.slice(0, 3).map((m) => (
+                    <div key={m.name} className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground w-28 truncate">{m.name}</span>
+                      <Progress value={m.mmlu} className="h-1 flex-1" />
+                      <span className="text-[10px] font-mono text-foreground w-6 text-right">{m.mmlu}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[9px] text-muted-foreground mt-2 italic">
+                  Public benchmark scores — reference only
+                </p>
+              </div>
               {(status?.scraper?.activeSources ?? 0) === 0 && (
                 <Button
                   onClick={() => seedSources.mutate()}
@@ -678,11 +698,91 @@ export default function Home() {
                   <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                 )}
                 {msg.ragChunksUsed && (msg.ragChunksUsed as any[]).length > 0 && (
-                  <div className="mt-2 flex items-center gap-1 flex-wrap">
-                    <Globe className="w-3 h-3 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">
-                      {(msg.ragChunksUsed as any[]).length} knowledge sources used
-                    </span>
+                  <div className="mt-2">
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border bg-secondary/40 hover:bg-secondary hover:border-primary/40 text-xs text-muted-foreground hover:text-primary transition-colors cursor-pointer"
+                        >
+                          <Globe className="w-3 h-3" />
+                          <span>
+                            {(msg.ragChunksUsed as any[]).length} knowledge source
+                            {(msg.ragChunksUsed as any[]).length === 1 ? "" : "s"} used
+                          </span>
+                          <ChevronRight className="w-3 h-3" />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        side="top"
+                        className="w-96 max-h-80 overflow-y-auto p-3"
+                      >
+                        <p className="text-xs font-semibold text-foreground mb-2 flex items-center gap-1.5">
+                          <Database className="w-3 h-3 text-primary" />
+                          Sources used in this response
+                        </p>
+                        <div className="space-y-2">
+                          {(() => {
+                            // De-duplicate by URL (or title) so repeated chunks from the same source collapse
+                            const seen = new Map<string, any>();
+                            for (const c of msg.ragChunksUsed as any[]) {
+                              const key = (c.url || c.title || c.source || c.id) as string;
+                              if (!seen.has(key)) seen.set(key, c);
+                            }
+                            const unique = Array.from(seen.values());
+                            return unique.map((chunk, idx) => {
+                              const label = chunk.title || chunk.source || chunk.url || "Unknown source";
+                              const href = chunk.url as string | null | undefined;
+                              const similarity =
+                                typeof chunk.distance === "number"
+                                  ? Math.max(0, Math.min(100, Math.round((1 - chunk.distance) * 100)))
+                                  : null;
+                              return (
+                                <div
+                                  key={`${chunk.id ?? idx}-${idx}`}
+                                  className="p-2 rounded-md border border-border bg-card text-xs"
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex-1 min-w-0">
+                                      {href ? (
+                                        <a
+                                          href={href}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="font-medium text-primary hover:underline break-words"
+                                        >
+                                          {label}
+                                        </a>
+                                      ) : (
+                                        <span className="font-medium text-foreground break-words">
+                                          {label}
+                                        </span>
+                                      )}
+                                      {href && (
+                                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                                          {href}
+                                        </p>
+                                      )}
+                                    </div>
+                                    {similarity !== null && (
+                                      <Badge variant="outline" className="text-[10px] flex-shrink-0">
+                                        {similarity}%
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  {chunk.sourceType && (
+                                    <Badge variant="outline" className="text-[10px] mt-1">
+                                      {chunk.sourceType}
+                                    </Badge>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground mt-1">
@@ -727,7 +827,54 @@ export default function Home() {
         {/* Input area */}
         <div className="px-4 py-3 border-t border-border"
           style={{ background: "oklch(0.10 0.016 240 / 0.8)", backdropFilter: "blur(8px)" }}>
+          {/* Attached files preview */}
+          {attachedFiles.length > 0 && (
+            <div className="max-w-4xl mx-auto mb-2 flex flex-wrap gap-2">
+              {attachedFiles.map((f, i) => (
+                <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-secondary border border-border text-xs">
+                  <Upload className="w-3 h-3 text-primary" />
+                  <span className="truncate max-w-[200px]">{f.name}</span>
+                  <span className="text-muted-foreground">({(f.size / 1024).toFixed(0)}KB)</span>
+                  <button
+                    onClick={() => setAttachedFiles(prev => prev.filter((_, idx) => idx !== i))}
+                    className="text-muted-foreground hover:text-red-400 ml-1"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-end gap-2 max-w-4xl mx-auto">
+            <input
+              ref={chatFileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.rs,.go"
+              onChange={(e) => {
+                if (e.target.files) {
+                  setAttachedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                  e.target.value = "";
+                }
+              }}
+            />
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-12 w-12 rounded-xl flex-shrink-0 text-muted-foreground hover:text-primary"
+                  onClick={() => chatFileInputRef.current?.click()}
+                >
+                  <Upload className="w-5 h-5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Attach files (added to knowledge base)</TooltipContent>
+            </Tooltip>
+
             <div className="flex-1 relative">
               <textarea
                 value={input}
@@ -767,8 +914,8 @@ export default function Home() {
               size="icon"
               className="h-12 w-12 rounded-xl flex-shrink-0"
               onClick={handleSend}
-              disabled={!input.trim() || isSending}
-              style={{ boxShadow: input.trim() ? "0 0 16px oklch(0.72 0.18 195 / 0.3)" : undefined }}
+              disabled={(!input.trim() && attachedFiles.length === 0) || isSending}
+              style={{ boxShadow: (input.trim() || attachedFiles.length > 0) ? "0 0 16px oklch(0.72 0.18 195 / 0.3)" : undefined }}
             >
               {isSending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
             </Button>
@@ -967,6 +1114,116 @@ export default function Home() {
               </ScrollArea>
             </>
           )}
+
+          {/* Upload Panel */}
+          {sidePanel === "upload" && (
+            <>
+              <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+                <Upload className="w-4 h-4 text-primary" />
+                <span className="font-semibold text-sm">File Upload</span>
+              </div>
+              <div className="flex-1 overflow-hidden p-3">
+                <FileUploadPanel />
+              </div>
+            </>
+          )}
+
+          {/* Benchmarks Panel */}
+          {sidePanel === "benchmarks" && (() => {
+            const chunks = status?.knowledge?.totalChunks ?? 0;
+            const sources = status?.scraper?.totalSources ?? 0;
+            const activeSources = status?.scraper?.activeSources ?? 0;
+            const models = status?.ollama?.models?.length ?? 0;
+            const convCount = conversations?.length ?? 0;
+
+            // Milestone targets — bars fill toward the next round number.
+            const nextMilestone = (n: number, step: number) =>
+              Math.max(step, Math.ceil((n + 1) / step) * step);
+            const chunkTarget = nextMilestone(chunks, 1000);
+            const sourceTarget = nextMilestone(sources, 25);
+            const convTarget = nextMilestone(convCount, 50);
+
+            const jarvisStats = [
+              { label: "Knowledge Chunks", value: chunks, target: chunkTarget },
+              { label: "Active Sources",   value: activeSources, target: sourceTarget, suffix: ` / ${sources} total` },
+              { label: "Conversations",    value: convCount, target: convTarget },
+              { label: "Local Models",     value: models, target: Math.max(5, models + 1) },
+            ];
+
+            return (
+              <>
+                <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-primary" />
+                  <span className="font-semibold text-sm">Benchmarks</span>
+                </div>
+                <ScrollArea className="flex-1 p-3 overflow-hidden">
+                  {/* Jarvis self-reported stats */}
+                  <div className="mb-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Brain className="w-3.5 h-3.5 text-primary" />
+                      <span className="text-xs font-semibold uppercase tracking-wider text-primary">
+                        Jarvis Stats
+                      </span>
+                    </div>
+                    <div className="space-y-3">
+                      {jarvisStats.map((s) => {
+                        const pct = Math.min(100, Math.round((s.value / s.target) * 100));
+                        return (
+                          <div key={s.label}>
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="text-muted-foreground">{s.label}</span>
+                              <span className="font-mono text-foreground">
+                                {s.value.toLocaleString()}
+                                {s.suffix ?? ` / ${s.target.toLocaleString()}`}
+                              </span>
+                            </div>
+                            <Progress value={pct} className="h-1.5" />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <Separator className="my-4" />
+
+                  {/* AI landscape reference card */}
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Globe className="w-3.5 h-3.5 text-primary" />
+                      <span className="text-xs font-semibold uppercase tracking-wider text-primary">
+                        AI Landscape
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mb-3">
+                      Public benchmark scores (MMLU / HumanEval). Reference only.
+                    </p>
+                    <div className="space-y-3">
+                      {AI_LANDSCAPE.map((m) => (
+                        <div key={m.name} className="p-2 rounded-lg border border-border bg-card">
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-xs font-medium">{m.name}</span>
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              MMLU {m.mmlu} · HE {m.humanEval}
+                            </span>
+                          </div>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-muted-foreground w-12">MMLU</span>
+                              <Progress value={m.mmlu} className="h-1 flex-1" />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-muted-foreground w-12">HumanEval</span>
+                              <Progress value={m.humanEval} className="h-1 flex-1" />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </ScrollArea>
+              </>
+            );
+          })()}
 
           {/* Logs Panel */}
           {sidePanel === "logs" && (
