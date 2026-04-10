@@ -10,6 +10,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { ingestFileToKnowledge } from "./fileIngestion.js";
 import { logger } from "./logger.js";
+import { getUploadedFileChunkCounts, deleteChunksByFileUrl } from "./db.js";
 
 const router = Router();
 
@@ -178,22 +179,67 @@ router.post("/upload-folder", upload.array("files", 100), async (req, res) => {
 });
 
 // ── Get Upload Status ──────────────────────────────────────────────────────────
-router.get("/upload-status", (req, res) => {
-  const files = fs.readdirSync(uploadDir);
-  const stats = files.map(f => {
-    const filepath = path.join(uploadDir, f);
-    const stat = fs.statSync(filepath);
-    return {
-      filename: f,
-      size: stat.size,
-      uploadedAt: stat.birthtime,
-    };
-  });
-  
-  res.json({
-    totalFiles: files.length,
-    files: stats.slice(0, 50), // Last 50 uploads
-  });
+router.get("/upload-status", async (req, res) => {
+  try {
+    const files = fs.readdirSync(uploadDir);
+    const chunkCounts = await getUploadedFileChunkCounts();
+
+    const stats = files
+      .map(f => {
+        const filepath = path.join(uploadDir, f);
+        const stat = fs.statSync(filepath);
+        const sourceUrl = `file://${filepath}`;
+        return {
+          filename: f,
+          // strip the timestamp prefix added by multer (e.g. "1234567890-name.pdf" -> "name.pdf")
+          displayName: f.replace(/^\d+-/, ""),
+          size: stat.size,
+          uploadedAt: stat.birthtime,
+          sourceUrl,
+          chunksAdded: chunkCounts[sourceUrl] ?? 0,
+          status: chunkCounts[sourceUrl] > 0 ? "complete" : "processing",
+        };
+      })
+      .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+
+    res.json({
+      totalFiles: stats.length,
+      files: stats.slice(0, 100),
+    });
+  } catch (err) {
+    logger.error("upload", `upload-status failed: ${err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ── Delete an uploaded file (and its chunks) ──────────────────────────────────
+router.delete("/upload/:filename", async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    // Prevent path traversal
+    if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+      return res.status(400).json({ error: "Invalid filename" });
+    }
+
+    const filepath = path.join(uploadDir, filename);
+    const sourceUrl = `file://${filepath}`;
+
+    let removedChunks = 0;
+    try {
+      removedChunks = await deleteChunksByFileUrl(sourceUrl);
+    } catch (err) {
+      logger.warn("upload", `Failed to delete chunks for ${filename}: ${err}`);
+    }
+
+    if (fs.existsSync(filepath)) {
+      fs.unlinkSync(filepath);
+    }
+
+    res.json({ success: true, filename, removedChunks });
+  } catch (err) {
+    logger.error("upload", `Delete failed: ${err}`);
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 export default router;

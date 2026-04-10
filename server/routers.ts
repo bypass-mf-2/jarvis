@@ -15,6 +15,7 @@ import {
   getKnowledgeChunks,
   countKnowledgeChunks,
   deleteKnowledgeChunk,
+  getActivityRates,
   addScrapeSource,
   getScrapeSources,
   toggleScrapeSource,
@@ -37,8 +38,9 @@ import {
 } from "./voiceLearning.js";
 import { logger } from "./logger";
 import { ragChat } from "./rag";
-import { scrapeSource, scrapeAllSources } from "./scraper";
-import { analyzeSelfForImprovements, safeApplyCodeChange } from "./selfImprovement";
+import { scrapeSource, scrapeAllSources, isScraperEnabled, setScraperEnabled } from "./scraper";
+import { analyzeSelfForImprovements, safeApplyCodeChange, analyzeImprovementFeed } from "./selfImprovement";
+import { readRecentEvents as readImprovementFeed } from "./improvementFeed";
 import { isOllamaAvailable, listOllamaModels } from "./ollama";
 import { seedDefaultSources } from "./services";
 import { transcribeAudio } from "./_core/voiceTranscription";
@@ -66,6 +68,7 @@ import {
   trainNewModel,
   trainSpecializedModel,
   getTrainingStats,
+  generateTrainingFromChunks,
 } from "./autoTrain.js";
 import { processWithAgentSwarm, getAgentStatus } from "./multiAgent.js";
 
@@ -131,7 +134,10 @@ const chatRouter = router({
         content: response,
         ragChunksUsed: ragChunks.map((c) => ({
           id: c.id,
-          source: c.metadata.sourceTitle || c.metadata.sourceUrl,
+          source: c.metadata.sourceTitle || c.metadata.sourceUrl || "Unknown",
+          url: c.metadata.sourceUrl || null,
+          title: c.metadata.sourceTitle || null,
+          sourceType: c.metadata.sourceType || null,
           distance: c.distance,
         })),
       });
@@ -260,6 +266,26 @@ const scraperRouter = router({
   discoverSources: publicProcedure.mutation(async () => {
     return runSourceDiscovery();
   }),
+
+  getEnabled: publicProcedure.query(() => ({ enabled: isScraperEnabled() })),
+
+  setEnabled: publicProcedure
+    .input(z.object({ enabled: z.boolean() }))
+    .mutation(async ({ input }) => {
+      setScraperEnabled(input.enabled);
+      try {
+        await setSetting(
+          "scraper_enabled",
+          input.enabled ? "true" : "false",
+          "boolean",
+          null,
+          "Global on/off switch for background scraping scheduler"
+        );
+      } catch (err) {
+        await logger.warn("scraper", `Failed to persist scraper_enabled: ${String(err)}`);
+      }
+      return { enabled: input.enabled };
+    }),
 });
 
 // ── Self-Improvement Router ───────────────────────────────────────────────────
@@ -269,6 +295,21 @@ const selfImprovementRouter = router({
   runAnalysis: publicProcedure.mutation(async () => {
     return analyzeSelfForImprovements();
   }),
+
+  // Phase 2: scan the improvement feed (real failure events captured during
+  // operation) for recurring patterns and turn them into pending patches.
+  // Safer than the legacy speculative analyzer because each proposal is
+  // grounded in concrete, recent failures.
+  analyzeFeed: publicProcedure.mutation(async () => {
+    return analyzeImprovementFeed();
+  }),
+
+  // Read-only view of the recent improvement feed events. Used by the
+  // Self-Improve panel to show "what's been hurting" alongside the
+  // proposed patches.
+  listFeed: publicProcedure
+    .input(z.object({ limit: z.number().default(50) }).optional())
+    .query(({ input }) => readImprovementFeed(input?.limit ?? 50)),
 
   approveOrRejectPatch: publicProcedure
     .input(
@@ -312,6 +353,11 @@ const systemStatusRouter = router({
   logs: publicProcedure
     .input(z.object({ limit: z.number().default(100) }))
     .query(async ({ input }) => getSystemLogs(input.limit)),
+
+  // Rolling-window counts of recently gathered chunks and sources. Used by
+  // the Benchmarks panel to show how fast the system is currently growing.
+  // Indexed columns make this fast even on large knowledge bases.
+  rates: publicProcedure.query(async () => getActivityRates()),
 });
 
 // ── Voice Router ──────────────────────────────────────────────────────────────
@@ -597,6 +643,17 @@ const trainingRouter = router({
         specialty: input.specialty,
         message: `${input.specialty} training started`
       };
+    }),
+
+  // Convert knowledge chunks into synthetic training examples on demand.
+  // Runs inline (not backgrounded) so the caller gets the counts back.
+  generateFromSources: publicProcedure
+    .input(z.object({
+      limit: z.number().min(1).max(500).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const result = await generateTrainingFromChunks(input.limit ?? 50);
+      return { success: true, ...result };
     }),
 });
 

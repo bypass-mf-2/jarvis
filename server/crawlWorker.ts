@@ -8,7 +8,7 @@
 
 import { parentPort, workerData } from "worker_threads";
 import { aggressiveSearch, aggressiveBatchSearch } from "./aggressiveScraper.js";
-import { fetchPageContent } from "./webSearch.js";
+import { fetchPageContentAndLinks } from "./webSearch.js";
 
 if (!parentPort) {
   throw new Error("crawlWorker must be run as a worker thread");
@@ -232,12 +232,16 @@ async function scrapeUrl(url: string): Promise<{
   discoveredLinks: Array<{ url: string; domain: string }>;
 } | null> {
   try {
-    const content = await fetchPageContent(url);
-    if (!content || content.length < 200) return null;
+    // Use the richer fetcher so links are extracted from raw HTML in the
+    // same network call. The previous extractLinksFromHTML(content) call
+    // was being passed already-stripped text and silently returned 0 every
+    // time, starving the crawl frontier.
+    const { text, links } = await fetchPageContentAndLinks(url);
+    if (!text || text.length < 200) return null;
 
-    const chunks = chunkText(content);
-    const links = extractLinksFromHTML(content);
-    const discoveredLinks = pickN(links, 10).map((link) => ({
+    const chunks = chunkText(text);
+    const allowedLinks = links.filter(isUrlAllowed);
+    const discoveredLinks = pickN(allowedLinks, 10).map((link) => ({
       url: link,
       domain: extractDomain(link),
     }));

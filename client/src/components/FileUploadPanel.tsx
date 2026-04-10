@@ -5,7 +5,7 @@
  * Supports images, PDFs, documents, videos, audio, code, etc.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -17,13 +17,33 @@ import {
 } from "lucide-react";
 
 interface UploadedFile {
-  name: string;
+  name: string;          // server filename (with timestamp prefix) - used for delete
+  displayName?: string;  // friendly name without timestamp prefix
   size: number;
   type: string;
   status: "uploading" | "processing" | "complete" | "error";
   progress: number;
   chunksAdded?: number;
   error?: string;
+  uploadedAt?: string;
+}
+
+// Guess a MIME-ish string from a filename for icon selection
+function guessTypeFromName(name: string | undefined | null): string {
+  if (!name) return "application/octet-stream";
+  const ext = String(name).toLowerCase().split(".").pop() ?? "";
+  const map: Record<string, string> = {
+    pdf: "application/pdf",
+    doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+    mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo",
+    mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4",
+    js: "text/javascript", ts: "text/typescript", py: "text/x-python", java: "text/x-java",
+    txt: "text/plain", md: "text/markdown", json: "application/json",
+  };
+  return map[ext] ?? "application/octet-stream";
 }
 
 export function FileUploadPanel() {
@@ -31,6 +51,48 @@ export function FileUploadPanel() {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Load existing uploads on mount + poll for chunk count updates ──────────
+  const refreshUploads = useCallback(async () => {
+    try {
+      const res = await fetch("/api/upload-status");
+      if (!res.ok) return;
+      const data = await res.json() as {
+        files: Array<{
+          filename: string;
+          displayName: string;
+          size: number;
+          uploadedAt: string;
+          chunksAdded: number;
+          status: "complete" | "processing";
+        }>;
+      };
+      // Merge server state with any in-flight uploads (preserve uploading/error rows by filename)
+      setFiles(prev => {
+        const inFlight = prev.filter(f => f.status === "uploading" || f.status === "error");
+        const fromServer: UploadedFile[] = data.files.map(f => ({
+          name: f.filename,
+          displayName: f.displayName ?? f.filename?.replace(/^\d+-/, ""),
+          size: f.size ?? 0,
+          type: guessTypeFromName(f.displayName ?? f.filename),
+          status: f.status ?? "complete",
+          progress: 100,
+          chunksAdded: f.chunksAdded ?? 0,
+          uploadedAt: f.uploadedAt,
+        }));
+        return [...inFlight, ...fromServer];
+      });
+    } catch {
+      // Silent — sidebar may open before server is ready
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshUploads();
+    // Poll every 5s while panel is open so processing → complete transitions show up
+    const interval = setInterval(refreshUploads, 5000);
+    return () => clearInterval(interval);
+  }, [refreshUploads]);
 
   // ── File Icon ──────────────────────────────────────────────────────────────
   const getFileIcon = (type: string) => {
@@ -86,7 +148,6 @@ export function FileUploadPanel() {
 
         xhr.addEventListener("load", () => {
           if (xhr.status === 200) {
-            const response = JSON.parse(xhr.responseText);
             setFiles(prev => {
               const updated = [...prev];
               updated[index] = {
@@ -96,20 +157,10 @@ export function FileUploadPanel() {
               };
               return updated;
             });
-
-            // Simulate processing completion
-            setTimeout(() => {
-              setFiles(prev => {
-                const updated = [...prev];
-                updated[index] = {
-                  ...updated[index],
-                  status: "complete",
-                  chunksAdded: Math.floor(Math.random() * 20) + 5, // TODO: get actual count
-                };
-                return updated;
-              });
-              toast.success(`${file.name} processed successfully`);
-            }, 2000);
+            toast.success(`${file.name} uploaded — processing...`);
+            // Refresh from server to get the real chunk count once processing finishes
+            setTimeout(refreshUploads, 1500);
+            setTimeout(refreshUploads, 5000);
           } else {
             throw new Error("Upload failed");
           }
@@ -181,19 +232,45 @@ export function FileUploadPanel() {
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   };
 
-  // ── Remove File ────────────────────────────────────────────────────────────
-  const removeFile = (index: number) => {
+  // ── Remove File (also deletes from disk + knowledge base) ──────────────────
+  const removeFile = useCallback(async (index: number) => {
+    const file = files[index];
+    if (!file) return;
+
+    // Optimistic UI: remove immediately
     setFiles(prev => prev.filter((_, i) => i !== index));
-  };
+
+    // Only call delete API if this is a server-side file (has been uploaded)
+    if (file.status !== "uploading" && file.name) {
+      try {
+        const res = await fetch(`/api/upload/${encodeURIComponent(file.name)}`, {
+          method: "DELETE",
+        });
+        if (res.ok) {
+          const data = await res.json() as { removedChunks: number };
+          toast.success(
+            `Removed ${file.displayName ?? file.name}` +
+            (data.removedChunks > 0 ? ` (${data.removedChunks} chunks)` : "")
+          );
+        } else {
+          toast.error(`Failed to delete ${file.displayName ?? file.name}`);
+          refreshUploads(); // Restore state from server
+        }
+      } catch {
+        toast.error("Delete request failed");
+        refreshUploads();
+      }
+    }
+  }, [files, refreshUploads]);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Upload Area */}
+    <div className="flex flex-col h-full min-h-0">
+      {/* Compact Upload Area */}
       <div
         className={`
-          border-2 border-dashed rounded-xl p-8 mb-4 transition-all
-          ${isDragging 
-            ? "border-primary bg-primary/5 scale-105" 
+          border-2 border-dashed rounded-lg p-3 mb-3 transition-all flex-shrink-0
+          ${isDragging
+            ? "border-primary bg-primary/5"
             : "border-border hover:border-primary/50"
           }
         `}
@@ -201,86 +278,64 @@ export function FileUploadPanel() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <div className="text-center space-y-4">
-          <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-            <Upload className="w-8 h-8 text-primary" />
-          </div>
-          
-          <div>
-            <h3 className="text-lg font-semibold mb-2">Upload Files to Knowledge Base</h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Drag and drop files here, or click to browse
-            </p>
-            
-            <div className="flex gap-2 justify-center flex-wrap">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fileInputRef.current?.click()}
-                className="gap-2"
-              >
-                <File className="w-4 h-4" />
-                Select Files
-              </Button>
-              
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => folderInputRef.current?.click()}
-                className="gap-2"
-              >
-                <FolderUp className="w-4 h-4" />
-                Upload Folder
-              </Button>
-            </div>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={handleFileSelect}
-              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.rs,.go"
-            />
-            
-            <input
-              ref={folderInputRef}
-              type="file"
-              multiple
-              {...{ webkitdirectory: "", directory: "" } as any}
-              className="hidden"
-              onChange={handleFileSelect}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted-foreground">
-            {[
-              { icon: Image, label: "Images" },
-              { icon: FileText, label: "Documents" },
-              { icon: FileVideo, label: "Videos" },
-              { icon: FileCode, label: "Code" },
-            ].map(({ icon: Icon, label }) => (
-              <div key={label} className="flex items-center gap-1 justify-center">
-                <Icon className="w-3 h-3" />
-                <span>{label}</span>
-              </div>
-            ))}
-          </div>
+        <div className="flex items-center gap-2 mb-2">
+          <Upload className="w-4 h-4 text-primary flex-shrink-0" />
+          <span className="text-xs text-muted-foreground truncate">
+            Drag files here or click below
+          </span>
         </div>
+
+        <div className="flex gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => fileInputRef.current?.click()}
+            className="gap-1 h-7 text-xs flex-1"
+          >
+            <File className="w-3 h-3" />
+            Files
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => folderInputRef.current?.click()}
+            className="gap-1 h-7 text-xs flex-1"
+          >
+            <FolderUp className="w-3 h-3" />
+            Folder
+          </Button>
+        </div>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileSelect}
+          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.rs,.go"
+        />
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          {...{ webkitdirectory: "", directory: "" } as any}
+          className="hidden"
+          onChange={handleFileSelect}
+        />
       </div>
 
       {/* File List */}
-      <div className="flex-1 overflow-hidden">
-        <div className="flex items-center justify-between mb-3 px-1">
-          <h4 className="text-sm font-semibold">Uploaded Files</h4>
+      <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex items-center justify-between mb-2 px-1 flex-shrink-0">
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Uploaded</h4>
           {files.length > 0 && (
             <Badge variant="secondary" className="text-xs">
-              {files.length} file{files.length !== 1 ? "s" : ""}
+              {files.length}
             </Badge>
           )}
         </div>
 
-        <ScrollArea className="h-[calc(100%-2rem)]">
+        <ScrollArea className="flex-1 min-h-0">
           {files.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground text-sm">
               No files uploaded yet
@@ -296,9 +351,10 @@ export function FileUploadPanel() {
                     <div className="flex items-center gap-2 flex-1 min-w-0">
                       {getFileIcon(file.type)}
                       <div className="flex-1 min-w-0">
-                        <p className="font-medium truncate">{file.name}</p>
+                        <p className="font-medium truncate">{file.displayName ?? file.name}</p>
                         <p className="text-muted-foreground">
                           {formatSize(file.size)}
+                          {file.uploadedAt && ` • ${new Date(file.uploadedAt).toLocaleDateString()}`}
                         </p>
                       </div>
                     </div>

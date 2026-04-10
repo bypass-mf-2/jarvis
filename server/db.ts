@@ -408,6 +408,50 @@ export async function getRecentErrorLogs(limit = 20) {
   return sqliteRun("SELECT * FROM system_logs WHERE level = 'error' ORDER BY createdAt DESC LIMIT ?", [limit]);
 }
 
+// ── Activity Rates ──────────────────────────────────────────────────────────
+// Counts new knowledge chunks and scrape sources within rolling time windows.
+// Used by the Benchmarks UI to show how fast the system is gathering data.
+// Both queries are indexed (idx_knowledgeChunks_createdAt /
+// idx_scrapeSources_createdAt) so they stay fast on large tables.
+export async function getActivityRates(): Promise<{
+  chunksLast1h: number;
+  chunksLast24h: number;
+  sourcesAddedLast24h: number;
+}> {
+  const now = Date.now();
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+  if (USE_MYSQL) {
+    const { db, schema, orm } = await getMysqlDb();
+    const [chunks1h, chunks24h, sources24h] = await Promise.all([
+      db.select({ n: orm.sql<number>`count(*)` })
+        .from(schema.knowledgeChunks)
+        .where(orm.gte(schema.knowledgeChunks.createdAt, new Date(oneHourAgo))),
+      db.select({ n: orm.sql<number>`count(*)` })
+        .from(schema.knowledgeChunks)
+        .where(orm.gte(schema.knowledgeChunks.createdAt, new Date(oneDayAgo))),
+      db.select({ n: orm.sql<number>`count(*)` })
+        .from(schema.scrapeSources)
+        .where(orm.gte(schema.scrapeSources.createdAt, new Date(oneDayAgo))),
+    ]);
+    return {
+      chunksLast1h: Number(chunks1h[0]?.n ?? 0),
+      chunksLast24h: Number(chunks24h[0]?.n ?? 0),
+      sourcesAddedLast24h: Number(sources24h[0]?.n ?? 0),
+    };
+  }
+
+  const c1 = sqliteRun("SELECT COUNT(*) as n FROM knowledge_chunks WHERE createdAt >= ?", [oneHourAgo]);
+  const c24 = sqliteRun("SELECT COUNT(*) as n FROM knowledge_chunks WHERE createdAt >= ?", [oneDayAgo]);
+  const s24 = sqliteRun("SELECT COUNT(*) as n FROM scrape_sources WHERE createdAt >= ?", [oneDayAgo]);
+  return {
+    chunksLast1h: c1[0]?.n ?? 0,
+    chunksLast24h: c24[0]?.n ?? 0,
+    sourcesAddedLast24h: s24[0]?.n ?? 0,
+  };
+}
+
 // ── Self-Improvement Patches ─────────────────────────────────────────────────
 export async function addPatch(data: any) {
   if (USE_MYSQL) {

@@ -26,6 +26,7 @@ const ZERO_SCRAPE_DISABLE_THRESHOLD = 5;
 import { addToVectorStore } from "./vectorStore";
 import { logger } from "./logger";
 import { fetchWithRetry } from "./webSearch";
+import { recordEvent as recordImprovementEvent } from "./improvementFeed";
 
 // ── Content Deduplication Cache ─────────────────────────────────────────────
 // Track content hashes to prevent duplicate scraping from same source
@@ -92,10 +93,27 @@ async function initializeDeduplicationCache(): Promise<void> {
 // this module is imported before initializeSQLiteDatabase() finishes).
 
 // ── Text utilities ────────────────────────────────────────────────────────────
-function stripHtml(html: string): string {
+// Strips HTML to plain text while preserving anchor URLs as inline
+// "text (url)" so downstream chunks keep the actual link destinations.
+// Without this preservation, asking Jarvis "what was the link to X?" had
+// no way to answer — the href data was destroyed before chunking.
+function stripHtml(html: string, baseUrl?: string): string {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    // Preserve anchor URLs: <a href="X">text</a> → text (X). When baseUrl
+    // is provided, relative hrefs are resolved to absolute. Skips fragment,
+    // mailto, and javascript hrefs since they're not useful as references.
+    .replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, text: string) => {
+      if (!href || href.startsWith("#") || href.startsWith("javascript:") || href.startsWith("mailto:")) {
+        return text;
+      }
+      let resolved = href;
+      if (baseUrl) {
+        try { resolved = new URL(href, baseUrl).toString(); } catch { /* keep raw */ }
+      }
+      return `${text} (${resolved})`;
+    })
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -137,8 +155,10 @@ async function scrapeRSS(url: string): Promise<Array<{ title: string; content: s
     const link = block.match(/<link[^>]*>(.*?)<\/link>/i);
 
     const titleText = (title?.[1] || title?.[2] || "").trim();
-    const descText = stripHtml(desc?.[1] || desc?.[2] || "").slice(0, 2000);
     const linkText = (link?.[1] || "").trim();
+    // Use the per-item link as the base URL when resolving relative anchors
+    // inside the item description; falls back to the feed URL if missing.
+    const descText = stripHtml(desc?.[1] || desc?.[2] || "", linkText || url).slice(0, 2000);
 
     if (titleText && descText) {
       items.push({ title: titleText, content: descText, link: linkText });
@@ -172,7 +192,8 @@ async function scrapeURL(url: string): Promise<{ title: string; content: string 
     html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ||
     html;
 
-  const content = stripHtml(contentHtml).slice(0, 8000);
+  // Pass the page URL so relative anchor hrefs resolve to absolute links.
+  const content = stripHtml(contentHtml, url).slice(0, 8000);
   return { title, content };
 }
 
@@ -272,7 +293,7 @@ async function storeChunks(
 // no parseable items at all (e.g., HTML page treated as RSS, dead URL).
 // A scrape that parses items but stores 0 chunks (because every chunk was
 // already in the cache) is HEALTHY and resets the counter.
-async function recordScrapeHealth(id: number, name: string, isBroken: boolean): Promise<void> {
+async function recordScrapeHealth(id: number, name: string, url: string, isBroken: boolean): Promise<void> {
   if (!isBroken) {
     await resetConsecutiveZeroScrapes(id);
     return;
@@ -284,6 +305,12 @@ async function recordScrapeHealth(id: number, name: string, isBroken: boolean): 
       "scraper",
       `Auto-disabled "${name}" after ${newCount} consecutive failed scrapes — re-enable manually if this was a transient issue`
     );
+    recordImprovementEvent({
+      type: "scrape_auto_disable",
+      module: "scraper",
+      summary: `Auto-disabled source "${name}" after ${newCount} broken scrapes`,
+      details: { sourceId: id, name, url, consecutiveFailures: newCount },
+    });
   }
 }
 
@@ -312,14 +339,14 @@ async function scrapeSource(source: any): Promise<{ success: boolean; chunks: nu
     }
 
     await updateScrapeSourceStatus(id, "success", undefined, totalChunks);
-    await recordScrapeHealth(id, name, itemsParsed === 0);
+    await recordScrapeHealth(id, name, url, itemsParsed === 0);
     await logger.info("scraper", `Scraped ${totalChunks} chunks from ${name}`);
 
     return { success: true, chunks: totalChunks };
   } catch (err) {
     await logger.error("scraper", `Failed to scrape ${name}: ${err}`);
     await updateScrapeSourceStatus(id, "error");
-    await recordScrapeHealth(id, name, true);
+    await recordScrapeHealth(id, name, url, true);
     return { success: false, chunks: 0 };
   }
 }
@@ -392,7 +419,16 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
       // scrapeSource() already calls updateScrapeSourceStatus() with the real
       // success/error result. Do NOT overwrite it here, and do NOT additionally
       // re-scrape every source via scrapeAllSources() — that was a double-scrape bug.
+      //
+      // Check _scraperEnabled BETWEEN sources so that toggling the switch off
+      // mid-cycle stops within seconds instead of burning through all 60+ due
+      // sources (each generating dozens of embedding calls that starve Ollama
+      // and make the user's chat time out).
       for (const source of due) {
+        if (!_scraperEnabled) {
+          await logger.info("scraper", "Aborting in-flight scrape cycle (scraper disabled mid-cycle)");
+          break;
+        }
         await scrapeSource(source);
       }
     } finally {

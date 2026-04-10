@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 import {
@@ -91,13 +92,36 @@ export default function Home() {
     if (typeof window !== "undefined") synth.current = window.speechSynthesis;
   }, []);
 
+  // When the Benchmarks panel becomes active, force an immediate refetch of
+  // all its inputs so the bars and rates reflect the current state instantly
+  // instead of waiting for the next interval tick.
+  useEffect(() => {
+    if (sidePanel === "benchmarks") {
+      refetchStatus();
+      refetchConvs();
+      refetchRates();
+    }
+  }, [sidePanel]);
+
   // ── Queries ─────────────────────────────────────────────────────────────────
   const { data: conversations, refetch: refetchConvs } = trpc.chat.listConversations.useQuery();
   const { data: convData, refetch: refetchMessages } = trpc.chat.getConversation.useQuery(
     { id: activeConvId! },
     { enabled: !!activeConvId }
   );
-  const { data: status, refetch: refetchStatus } = trpc.systemStatus.status.useQuery(undefined, { refetchInterval: 30000 });
+  // Tighten refresh while the Benchmarks panel is open so the bars feel
+  // live; otherwise default to the cheaper 30s interval to avoid hammering
+  // the backend when no one is looking at the stats.
+  const { data: status, refetch: refetchStatus } = trpc.systemStatus.status.useQuery(
+    undefined,
+    { refetchInterval: sidePanel === "benchmarks" ? 10000 : 30000 }
+  );
+  // Activity rates — only fetched while the Benchmarks panel is open since
+  // it's the only consumer. Same 10s refresh cadence as the rest of the panel.
+  const { data: rates, refetch: refetchRates } = trpc.systemStatus.rates.useQuery(
+    undefined,
+    { enabled: sidePanel === "benchmarks", refetchInterval: 10000 }
+  );
   const { data: knowledgeData, refetch: refetchKnowledge } = trpc.knowledge.list.useQuery(
     { limit: 30, offset: 0 },
     { enabled: sidePanel === "knowledge" }
@@ -156,6 +180,16 @@ export default function Home() {
 
   const seedSources = trpc.scraper.seedSources.useMutation({
     onSuccess: (r) => { toast.success(`Seeded ${r.seeded} sources${r.scraped ? " and ran initial scrape" : ""}`); refetchSources(); refetchKnowledge(); refetchStatus(); },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const { data: scraperEnabledData, refetch: refetchScraperEnabled } = trpc.scraper.getEnabled.useQuery();
+  const scraperEnabled = scraperEnabledData?.enabled ?? true;
+  const setScraperEnabled = trpc.scraper.setEnabled.useMutation({
+    onSuccess: (r) => {
+      toast.success(r.enabled ? "Scraping resumed" : "Scraping paused");
+      refetchScraperEnabled();
+    },
     onError: (e) => toast.error(e.message),
   });
 
@@ -978,11 +1012,26 @@ export default function Home() {
                     Seed
                   </Button>
                   <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
-                    onClick={() => scrapeNow.mutate({})} disabled={scrapeNow.isPending}>
+                    onClick={() => scrapeNow.mutate({})} disabled={scrapeNow.isPending || !scraperEnabled}>
                     {scrapeNow.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                     Scrape All
                   </Button>
                 </div>
+              </div>
+
+              {/* Master on/off toggle */}
+              <div className="px-4 py-2 border-b border-border flex items-center justify-between bg-muted/30">
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium">Background Scraping</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {scraperEnabled ? "Running on schedule" : "Paused — no auto-scrapes"}
+                  </span>
+                </div>
+                <Switch
+                  checked={scraperEnabled}
+                  disabled={setScraperEnabled.isPending}
+                  onCheckedChange={(checked) => setScraperEnabled.mutate({ enabled: checked })}
+                />
               </div>
 
               {/* Add source form */}
@@ -1181,6 +1230,49 @@ export default function Home() {
                           </div>
                         );
                       })}
+                    </div>
+                  </div>
+
+                  <Separator className="my-4" />
+
+                  {/* Activity rates — server-side rolling window counts */}
+                  <div className="mb-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Activity className="w-3.5 h-3.5 text-primary" />
+                      <span className="text-xs font-semibold uppercase tracking-wider text-primary">
+                        Activity
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        {
+                          label: "Chunks 1h",
+                          value: rates?.chunksLast1h ?? 0,
+                          // chunks/min derived from the hourly count — feels live without
+                          // requiring a finer sampling cadence
+                          sub: rates ? `${(rates.chunksLast1h / 60).toFixed(1)}/min` : null,
+                        },
+                        {
+                          label: "Chunks 24h",
+                          value: rates?.chunksLast24h ?? 0,
+                          sub: null,
+                        },
+                        {
+                          label: "New sources 24h",
+                          value: rates?.sourcesAddedLast24h ?? 0,
+                          sub: null,
+                        },
+                      ].map((m) => (
+                        <div
+                          key={m.label}
+                          className="rounded-lg p-2 text-center"
+                          style={{ background: "oklch(0.12 0.018 240)", border: "1px solid oklch(0.22 0.03 230)" }}
+                        >
+                          <p className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">{m.label}</p>
+                          <p className="text-sm font-mono text-foreground">{m.value.toLocaleString()}</p>
+                          {m.sub && <p className="text-[9px] text-muted-foreground mt-0.5">{m.sub}</p>}
+                        </div>
+                      ))}
                     </div>
                   </div>
 

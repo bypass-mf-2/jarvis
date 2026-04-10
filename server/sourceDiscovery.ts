@@ -34,8 +34,10 @@ import {
   getTopDomains,
 } from "./db";
 import { getScraperStats, getTotalScrapingCost } from "./aggressiveScraper.js";
+import { isScraperEnabled } from "./scraper.js";
 import { logger } from "./logger";
 import { nanoid } from "nanoid";
+import { recordEvent as recordImprovementEvent } from "./improvementFeed.js";
 
 // ── Worker management ──────────────────────────────────────────────────────────
 let _worker: Worker | null = null;
@@ -136,17 +138,73 @@ function handleWorkerMessage(msg: any): Promise<void> {
 
       case "rss-discovered": {
         try {
+          if (!msg.url || !isValidUrl(msg.url)) break;
           const existing = await getScrapeSources();
-          const alreadyExists = existing.some((s: any) => s.url === msg.url);
-          if (!alreadyExists) {
-            await addScrapeSource({
-              name: `Auto-discovered: ${msg.url.slice(0, 50)}`,
-              url: msg.url,
-              type: "rss",
-              intervalMinutes: 30,
-            });
-            await logger.info("sourceDiscovery", `Added new RSS source: ${msg.url}`);
+          if (existing.some((s: any) => s.url === msg.url)) break;
+
+          // Validate the feed is reachable AND actually looks like RSS/Atom
+          // before persisting it. Prevents the scrape_sources table from
+          // filling up with dead or bot-blocked URLs.
+          const probe = await fetch(msg.url, {
+            method: "GET",
+            headers: { "User-Agent": "JarvisAI/1.0 RSS Reader" },
+            signal: AbortSignal.timeout(8000),
+          }).catch(() => null);
+
+          if (!probe || !probe.ok) {
+            await logger.warn("sourceDiscovery", `Rejected unreachable RSS: ${msg.url}`);
+            break;
           }
+
+          const ct = probe.headers.get("content-type") || "";
+          const head = (await probe.text()).slice(0, 2000).toLowerCase();
+          const looksLikeFeed =
+            ct.includes("xml") ||
+            ct.includes("rss") ||
+            ct.includes("atom") ||
+            head.includes("<rss") ||
+            head.includes("<feed") ||
+            head.includes("<rdf");
+
+          if (!looksLikeFeed) {
+            // Not an RSS feed — but the URL might still be a useful HTML
+            // page (a Reddit thread, a tutorial, a docs page). Instead of
+            // dropping it, push it to the crawl frontier so the random
+            // crawler can ingest it once and harvest its outgoing links.
+            // This recovers all the "Not an RSS/Atom feed" rejections that
+            // used to be wasted work.
+            try {
+              const alreadyQueued = await isFrontierUrl(msg.url);
+              if (!alreadyQueued) {
+                let domain = "";
+                try { domain = new URL(msg.url).hostname; } catch { /* skip on bad URL */ }
+                if (domain) {
+                  // Lower priority than search-result discoveries (those
+                  // are typically depth=1, priority=10) so the frontier
+                  // still drains search hits first.
+                  await addToFrontier(msg.url, domain, 1, 5, "rss-discovery-fallback");
+                  await logger.info("sourceDiscovery", `Routed non-RSS candidate to frontier: ${msg.url}`);
+                }
+              }
+            } catch (err) {
+              await logger.warn("sourceDiscovery", `Failed to route non-RSS candidate to frontier: ${err}`);
+            }
+            recordImprovementEvent({
+              type: "discovery_validation_rejected",
+              module: "sourceDiscovery",
+              summary: `Routed non-RSS URL to crawl frontier`,
+              details: { url: msg.url, contentType: ct, action: "frontier" },
+            });
+            break;
+          }
+
+          await addScrapeSource({
+            name: `Auto-discovered: ${msg.url.slice(0, 50)}`,
+            url: msg.url,
+            type: "rss",
+            intervalMinutes: 30,
+          });
+          await logger.info("sourceDiscovery", `Added new RSS source: ${msg.url}`);
         } catch (err) {
           await logger.warn("sourceDiscovery", `Failed to add RSS source: ${err}`);
         }
@@ -169,6 +227,13 @@ function handleWorkerMessage(msg: any): Promise<void> {
 
 // ── Run a full crawl cycle via the worker ──────────────────────────────────────
 async function runDiscoveryCycle(): Promise<void> {
+  // Respect the global scraping toggle — source discovery crawls hundreds of
+  // pages per cycle, which saturates the network and CPU and causes Ollama
+  // chat requests to time out. Pause entirely when scraping is disabled.
+  if (!isScraperEnabled()) {
+    await logger.info("sourceDiscovery", "Skipping cycle (scraper disabled)");
+    return;
+  }
   if (_crawling) {
     await logger.info("sourceDiscovery", "Skipping cycle (already running)");
     return;

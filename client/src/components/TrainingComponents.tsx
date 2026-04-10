@@ -5,7 +5,7 @@
  */
 
 import { useState } from "react";
-import { Star, Brain, Zap, TrendingUp, Activity, Loader2 } from "lucide-react";
+import { Star, Brain, Zap, TrendingUp, Activity, Loader2, Database } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -85,6 +85,17 @@ export function TrainingDashboard() {
       refetch();
     },
   });
+  const generateFromSources = trpc.training.generateFromSources.useMutation({
+    onSuccess: (result) => {
+      toast.success(
+        `Generated ${result.inserted} training examples from sources (${result.skipped} skipped)`
+      );
+      refetch();
+    },
+    onError: (err) => {
+      toast.error(`Generation failed: ${err.message}`);
+    },
+  });
 
   if (!stats) return <div>Loading...</div>;
 
@@ -161,10 +172,48 @@ export function TrainingDashboard() {
         </Card>
       </div>
 
+      {/* Learn From Sources */}
+      <Card className="p-6">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <Database className="w-5 h-5 text-primary" />
+              Learn From Scraped Sources
+            </h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              Convert knowledge chunks from your scrape sources into synthetic Q/A training
+              examples. Each chunk is used at most once.
+            </p>
+          </div>
+          <Button
+            onClick={() => generateFromSources.mutate({ limit: 50 })}
+            disabled={generateFromSources.isPending}
+            className="gap-2 flex-shrink-0"
+          >
+            {generateFromSources.isPending ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Generating...
+              </>
+            ) : (
+              <>
+                <Database className="w-4 h-4" /> Generate from Sources
+              </>
+            )}
+          </Button>
+        </div>
+        {generateFromSources.data && (
+          <div className="mt-2 text-xs text-muted-foreground font-mono bg-secondary/50 rounded px-2 py-1">
+            Last run: {generateFromSources.data.inserted} inserted ·{" "}
+            {generateFromSources.data.skipped} skipped ·{" "}
+            {generateFromSources.data.attempted} attempted
+          </div>
+        )}
+      </Card>
+
       {/* Training Actions */}
       <Card className="p-6">
         <h3 className="text-lg font-semibold mb-4">Train New Models</h3>
-        
+
         {!readyToTrain && (
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-4 mb-4">
             <p className="text-sm text-amber-400">

@@ -15,8 +15,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
-import { ollamaChatBackground as ollamaChat } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat, ollamaChatJson } from "./ollama.js";
 import { logger } from "./logger.js";
+import { readRecentEvents, type ImprovementEvent } from "./improvementFeed.js";
+import { addPatch } from "./db.js";
 
 const BACKUP_DIR = path.join(process.cwd(), ".jarvis-backups");
 const SAFE_MODE_FLAG = path.join(process.cwd(), ".safe-mode");
@@ -443,6 +445,149 @@ Focus on HIGH PRIORITY issues only. Return ONLY the JSON array.`;
   improvements.sort((a, b) => b.priority - a.priority);
 
   return improvements.slice(0, 20); // Top 20 improvements
+}
+
+// ── Improvement Feed Analyzer ──────────────────────────────────────────────
+// Phase 2: read real failure events from the improvement feed (parse failures,
+// auto-disabled sources, validator rejections, etc.) and ask the LLM to
+// propose targeted code patches grounded in the actual pain points. Patches
+// land in self_improvement_patches as `pending` so the user reviews them in
+// the existing Self-Improve UI panel — same flow as the legacy analyzer.
+
+// A pattern type needs at least this many events before it's worth asking
+// the LLM to propose a fix. Below this threshold the signal is too noisy.
+const FEED_ANALYSIS_MIN_OCCURRENCES = 3;
+
+interface FeedPattern {
+  type: string;
+  count: number;
+  sampleSummaries: string[];
+  sampleDetails: Array<Record<string, unknown> | undefined>;
+  modules: string[];
+}
+
+function aggregateFeedPatterns(events: ImprovementEvent[]): FeedPattern[] {
+  const byType = new Map<string, FeedPattern>();
+  for (const event of events) {
+    if (!byType.has(event.type)) {
+      byType.set(event.type, {
+        type: event.type,
+        count: 0,
+        sampleSummaries: [],
+        sampleDetails: [],
+        modules: [],
+      });
+    }
+    const pattern = byType.get(event.type)!;
+    pattern.count++;
+    if (pattern.sampleSummaries.length < 5) pattern.sampleSummaries.push(event.summary);
+    if (pattern.sampleDetails.length < 5) pattern.sampleDetails.push(event.details);
+    if (!pattern.modules.includes(event.module)) pattern.modules.push(event.module);
+  }
+  return Array.from(byType.values())
+    .filter(p => p.count >= FEED_ANALYSIS_MIN_OCCURRENCES)
+    .sort((a, b) => b.count - a.count);
+}
+
+interface FeedPatchProposal {
+  summary: string;
+  targetFile: string;
+  rationale: string;
+  severity: "low" | "medium" | "high";
+}
+
+async function proposePatchForPattern(pattern: FeedPattern): Promise<FeedPatchProposal | null> {
+  const prompt = `You are JARVIS's self-improvement analyzer. Below is a recurring failure pattern from the improvement feed (a log of high-signal events captured during normal operation). Propose ONE targeted code change that would reduce or eliminate this pattern.
+
+Pattern type: ${pattern.type}
+Occurrences in recent feed: ${pattern.count}
+Source modules: ${pattern.modules.join(", ")}
+
+Sample event summaries:
+${pattern.sampleSummaries.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}
+
+Sample event details (JSON):
+${pattern.sampleDetails.map((d, i) => `  ${i + 1}. ${JSON.stringify(d ?? {})}`).join("\n")}
+
+Reply with STRICT JSON in this exact shape — no prose, no code fences:
+{"summary": "one-line description of the fix", "targetFile": "server/<file>.ts", "rationale": "1-3 sentences on why this fix addresses the pattern", "severity": "low|medium|high"}
+
+Rules:
+- targetFile must be a real path under server/, client/src/, or shared/
+- If you can't propose a useful concrete fix, return: {"summary": "", "targetFile": "", "rationale": "", "severity": "low"}
+- Prefer fixes that prevent the failure rather than masking it`;
+
+  const raw = await ollamaChatJson([{ role: "user", content: prompt }]);
+  if (!raw) return null;
+
+  try {
+    const obj = JSON.parse(raw);
+    const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+    const targetFile = typeof obj.targetFile === "string" ? obj.targetFile.trim() : "";
+    const rationale = typeof obj.rationale === "string" ? obj.rationale.trim() : "";
+    const severity = obj.severity === "high" || obj.severity === "medium" ? obj.severity : "low";
+
+    // Reject empty / placeholder responses and invalid file paths.
+    if (!summary || !targetFile || !rationale) return null;
+    if (!targetFile.startsWith("server/") && !targetFile.startsWith("client/") && !targetFile.startsWith("shared/")) {
+      return null;
+    }
+
+    return { summary, targetFile, rationale, severity };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Phase 2 entry point: scan the improvement feed for recurring failure
+ * patterns and turn them into reviewable patches. Safe to call manually
+ * (via tRPC) or from the autonomous scheduler. All proposals land as
+ * `pending` patches — the user still approves before anything changes.
+ */
+export async function analyzeImprovementFeed(eventLimit = 200): Promise<{
+  eventsScanned: number;
+  patternsFound: number;
+  patchesProposed: number;
+}> {
+  const events = readRecentEvents(eventLimit);
+  if (events.length === 0) {
+    await logger.info("selfImprove", "Improvement feed is empty — nothing to analyze");
+    return { eventsScanned: 0, patternsFound: 0, patchesProposed: 0 };
+  }
+
+  const patterns = aggregateFeedPatterns(events);
+  await logger.info(
+    "selfImprove",
+    `Improvement feed analysis: ${events.length} events, ${patterns.length} patterns above threshold`
+  );
+
+  let proposed = 0;
+  for (const pattern of patterns) {
+    const proposal = await proposePatchForPattern(pattern);
+    if (!proposal) continue;
+
+    await addPatch({
+      analysisInput: JSON.stringify({
+        source: "improvementFeed",
+        patternType: pattern.type,
+        occurrences: pattern.count,
+        modules: pattern.modules,
+        sampleSummaries: pattern.sampleSummaries,
+      }).slice(0, 3000),
+      suggestion: `[feed/${pattern.type}] ${proposal.summary}\n\n${proposal.rationale}`,
+      patchDiff: null,
+      targetFile: proposal.targetFile,
+      status: "pending",
+    });
+    proposed++;
+    await logger.info(
+      "selfImprove",
+      `Feed-derived patch proposed for ${proposal.targetFile} (pattern: ${pattern.type}, ${pattern.count} events)`
+    );
+  }
+
+  return { eventsScanned: events.length, patternsFound: patterns.length, patchesProposed: proposed };
 }
 
 // ── Safe Mode Toggle ────────────────────────────────────────────────────────

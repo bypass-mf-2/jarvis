@@ -29,7 +29,7 @@ fi
 # ── [1/7] System packages ────────────────────────────────────────────────────
 echo "[1/7] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq curl git build-essential python3 python3-pip python3-venv python3-dev portaudio19-dev
+apt-get install -y -qq curl git build-essential python3 python3-pip python3-venv python3-dev portaudio19-dev ffmpeg poppler-utils tesseract-ocr
 
 # ── [2/7] Node.js 22 ────────────────────────────────────────────────────────
 echo "[2/7] Installing Node.js 22..."
@@ -47,11 +47,25 @@ if ! command -v pnpm &>/dev/null; then
 fi
 echo "  pnpm $(pnpm --version)"
 
-# ── [4/7] Ollama ────────────────────────────────────────────────────────────
+# ── [4/7] Ollama + models ───────────────────────────────────────────────────
 echo "[4/7] Installing Ollama..."
 if ! command -v ollama &>/dev/null; then
     curl -fsSL https://ollama.com/install.sh | sh
 fi
+
+# Make sure the daemon is running before pulling models
+systemctl start ollama 2>/dev/null || true
+sleep 3
+
+echo "  Pulling models (this can take a while on first run)..."
+# Chat model — small, fast, good for CPU-only
+ollama pull llama3.2:3b 2>&1 | tail -n 1 || echo "  llama3.2:3b pull failed (will retry later)"
+# Embeddings — required for ChromaDB vector search
+ollama pull nomic-embed-text 2>&1 | tail -n 1 || echo "  nomic-embed-text pull failed (will retry later)"
+# Vision — for image understanding in file ingestion
+ollama pull llava 2>&1 | tail -n 1 || echo "  llava pull failed (will retry later)"
+# Code-aware model
+ollama pull qwen2.5-coder:7b 2>&1 | tail -n 1 || echo "  qwen2.5-coder:7b pull failed (will retry later)"
 
 # ── [5/7] Node dependencies ─────────────────────────────────────────────────
 echo "[5/7] Installing Node dependencies..."

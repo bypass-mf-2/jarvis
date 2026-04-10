@@ -114,6 +114,45 @@ function parseHTMLResults(
   return results;
 }
 
+// Strip HTML to plain text, preserving anchor href targets as inline
+// `text (url)` so downstream chunks keep the actual destination URLs.
+// Removes script/style/nav/header/footer/aside chrome before flattening.
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
+    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+    .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, "")
+    // Preserve anchor URLs: <a href="X">text</a> → text (X)
+    .replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, "$2 ($1)")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Extract absolute http(s) link targets from raw HTML. Relative paths are
+// resolved against the page URL so the crawl frontier sees real URLs.
+function extractLinksFromHtml(html: string, pageUrl: string): string[] {
+  const urls = new Set<string>();
+  const anchorRe = /<a\s+[^>]*href=["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const href = m[1];
+    if (!href || href.startsWith("#") || href.startsWith("javascript:") || href.startsWith("mailto:")) continue;
+    try {
+      const abs = new URL(href, pageUrl).toString();
+      if (abs.startsWith("http://") || abs.startsWith("https://")) {
+        urls.add(abs);
+      }
+    } catch {
+      // skip malformed URLs
+    }
+  }
+  return Array.from(urls);
+}
+
 // ── Fetch Page Content ───────────────────────────────────────────────────
 export async function fetchPageContent(url: string): Promise<string> {
   await logger.info("webSearch", `Fetching page: ${url.slice(0, 50)}...`);
@@ -132,22 +171,43 @@ export async function fetchPageContent(url: string): Promise<string> {
     }
 
     const html = await response.text();
-
-    let clean = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
-      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
-      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
-      .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    return clean;
+    return htmlToText(html);
   } catch (err) {
     await logger.warn("webSearch", `Failed to fetch ${url}: ${err}`);
     return "";
+  }
+}
+
+// Like fetchPageContent but also extracts outgoing links from the raw HTML
+// in the same fetch. Used by the crawler to grow its frontier — the previous
+// design tried to extract links from already-stripped text, which silently
+// returned 0 every time.
+export async function fetchPageContentAndLinks(
+  url: string
+): Promise<{ text: string; links: string[] }> {
+  await logger.info("webSearch", `Fetching page (with links): ${url.slice(0, 50)}...`);
+
+  try {
+    const response = await fetchWithRetry(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    return {
+      text: htmlToText(html),
+      links: extractLinksFromHtml(html, url),
+    };
+  } catch (err) {
+    await logger.warn("webSearch", `Failed to fetch ${url}: ${err}`);
+    return { text: "", links: [] };
   }
 }
 

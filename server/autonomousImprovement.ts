@@ -21,14 +21,15 @@ import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { ollamaChatBackground as ollamaChat } from "./ollama";
-import { 
-  getRecentErrorLogs, 
-  getSystemLogs, 
-  addPatch, 
+import {
+  getRecentErrorLogs,
+  getSystemLogs,
+  addPatch,
   updatePatchStatus,
-  getPatches 
+  getPatches
 } from "./db";
 import { logger } from "./logger";
+import { analyzeImprovementFeed } from "./selfImprovement.js";
 
 const execAsync = promisify(exec);
 const PROJECT_ROOT = process.cwd();
@@ -355,13 +356,29 @@ export async function runAutonomousAnalysis(): Promise<{
   patchesPending: number;
 }> {
   await logger.info("autonomousImprovement", "Starting autonomous analysis cycle");
-  
+
   // Check rate limiting
   if (patchesAppliedThisHour >= config.maxPatchesPerHour) {
     await logger.info("autonomousImprovement", "Rate limit reached, skipping cycle");
     return { patchesGenerated: 0, patchesApplied: 0, patchesPending: 0 };
   }
-  
+
+  // Phase 2: scan the improvement feed for grounded failure patterns and
+  // turn them into pending patches. These run alongside the legacy LLM
+  // brainstorming below — feed-derived patches are concrete (rooted in real
+  // events) while the brainstormed ones are speculative.
+  try {
+    const feedResult = await analyzeImprovementFeed();
+    if (feedResult.patchesProposed > 0) {
+      await logger.info(
+        "autonomousImprovement",
+        `Feed analysis: ${feedResult.patchesProposed} patches proposed from ${feedResult.eventsScanned} events (${feedResult.patternsFound} patterns)`
+      );
+    }
+  } catch (err) {
+    await logger.warn("autonomousImprovement", `Feed analysis failed: ${String(err)}`);
+  }
+
   const context = await buildAdvancedContext();
   
   // Generate improvement suggestions

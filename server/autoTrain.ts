@@ -16,7 +16,9 @@ import * as path from "path";
 import { execSync } from "child_process";
 import { getDatabase, saveDatabase } from "./sqlite-init.js";
 import { logger } from "./logger.js";
-import { ollamaChatBackground as ollamaChat, ollamaChatJson } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat, ollamaChatJson, JSON_MODEL } from "./ollama.js";
+import { recordEvent as recordImprovementEvent } from "./improvementFeed.js";
+import { isScraperEnabled } from "./scraper.js";
 
 const USE_MYSQL = !!process.env.DATABASE_URL;
 
@@ -125,12 +127,27 @@ function parseQAJson(raw: string): { instruction: string; output: string } | nul
   const match = raw.match(/\{[\s\S]*\}/);
   if (match && match[0] !== raw) candidates.push(match[0]);
 
+  // Small models stubbornly use {question, answer} no matter how clearly
+  // the prompt asks for {instruction, output} — both shapes are accepted.
+  // Field aliases observed in production logs (see logs/improvement-feed.jsonl):
+  //   instruction ← question | prompt | input
+  //   output      ← answer | response | result | completion
+  const pickField = (obj: any, names: string[]): string => {
+    for (const n of names) {
+      if (typeof obj?.[n] === "string") return obj[n].trim();
+    }
+    return "";
+  };
+
   for (const candidate of candidates) {
     try {
       const obj = JSON.parse(candidate);
-      const instruction = typeof obj.instruction === "string" ? obj.instruction.trim() : "";
-      const output = typeof obj.output === "string" ? obj.output.trim() : "";
-      if (instruction.length >= 5 && output.length >= 20) {
+      const instruction = pickField(obj, ["instruction", "question", "prompt", "input"]);
+      const output = pickField(obj, ["output", "answer", "response", "result", "completion"]);
+      // Output minimum lowered from 20 → 5 chars: short factual answers
+      // ("300 seconds", "60 regions", "Yes") are valid training data and
+      // were the only failure mode left after the format=json fix.
+      if (instruction.length >= 5 && output.length >= 5) {
         return { instruction, output };
       }
     } catch {
@@ -165,17 +182,29 @@ ${chunk.content.slice(0, 3000)}
   if (!parsed) {
     // Surface what the model actually returned so future regressions are
     // visible instead of silently producing 0/N skipped batches.
+    const preview = raw.slice(0, 200) || "<empty>";
     await logger.warn(
       "autoTrain",
-      `parseQAJson failed for chunk ${chunk.id}; raw response (first 200 chars): ${raw.slice(0, 200) || "<empty>"}`
+      `parseQAJson failed for chunk ${chunk.id}; raw response (first 200 chars): ${preview}`
     );
+    recordImprovementEvent({
+      type: "autotrain_parse_failure",
+      module: "autoTrain",
+      summary: `LLM produced unparseable JSON for chunk ${chunk.id} using model ${model}`,
+      details: {
+        chunkId: chunk.id,
+        model,
+        rawPreview: preview,
+        sourceUrl: chunk.sourceUrl,
+      },
+    });
   }
   return parsed;
 }
 
 export async function generateTrainingFromChunks(
   limit = 50,
-  model = "llama3.2"
+  model: string = JSON_MODEL
 ): Promise<{ attempted: number; inserted: number; skipped: number }> {
   await logger.info(
     "autoTrain",
@@ -220,7 +249,20 @@ export async function generateTrainingFromChunks(
   let inserted = 0;
   let skipped = 0;
 
+  // If the user turned the scraper off while this loop is running, bail
+  // out immediately. Each iteration hits Ollama with a JSON chat call that
+  // blocks the model for 30-60s, so a 50-chunk loop can saturate Ollama
+  // for half an hour.
+  if (!isScraperEnabled()) {
+    await logger.info("autoTrain", "Skipping synthetic generation (scraper disabled)");
+    return { attempted: 0, inserted: 0, skipped: 0 };
+  }
+
   for (const chunk of rows) {
+    if (!isScraperEnabled()) {
+      await logger.info("autoTrain", "Aborting synthetic generation mid-loop (scraper disabled)");
+      break;
+    }
     try {
       const qa = await generateQAFromChunk(chunk, model);
       if (!qa) {

@@ -36,7 +36,17 @@
       "Bash(npx tsx:*)",
       "Bash(node -e \"const { resolve } = require\\('path'\\); const tsxPath = require.resolve\\('tsx'\\); console.log\\('tsx at:', tsxPath\\); console.log\\('dir:', resolve\\(tsxPath, '..'\\)\\); const fs = require\\('fs'\\); const dir = resolve\\(tsxPath, '..'\\); console.log\\(fs.readdirSync\\(dir\\).filter\\(f => f.includes\\('esm'\\) || f.includes\\('loader'\\) || f.includes\\('register'\\)\\)\\)\")",
       "Bash(node -e \"const p = require.resolve\\('tsx/esm'\\); console.log\\(p\\)\")",
-      "Bash(node -e \"import\\('tsx/esm/api'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")"
+      "Bash(node -e \"import\\('tsx/esm/api'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")",
+      "Bash(curl -sI -o /dev/null -w \"serpapi: %{http_code} dns_time=%{time_namelookup}s connect=%{time_connect}s\\\\n\" --max-time 10 https://serpapi.com/)",
+      "Bash(curl -sI -o /dev/null -w \"arxiv:   %{http_code} dns_time=%{time_namelookup}s connect=%{time_connect}s\\\\n\" --max-time 10 https://arxiv.org/)",
+      "Bash(curl -sI -o /dev/null -w \"github:  %{http_code} dns_time=%{time_namelookup}s connect=%{time_connect}s\\\\n\" --max-time 10 https://github.com/)",
+      "Bash(curl -v --max-time 8 https://serpapi.com/)",
+      "Bash(node:*)",
+      "Bash(pnpm up:*)",
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//tmp/**)",
+      "Bash(ls logs:*)",
+      "Bash(ls server/improvementFeed*)"
     ]
   }
 }

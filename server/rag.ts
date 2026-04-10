@@ -10,6 +10,7 @@ import { ollamaChat, ollamaChatStream, type OllamaMessage } from "./ollama";
 import { logger } from "./logger";
 import { getMemoryContext } from "./persistentMemory";
 import { searchWeb } from "./webSearch.js";
+import { isScraperEnabled } from "./scraper.js";
 import { smartRouteModel } from "./autoTrain.js";
 import { recordChunkRetrieval, incrementDomainRetrievals } from "./db";
 
@@ -34,9 +35,11 @@ async function buildAugmentedMessages(
   // ✅ ADD THIS: Get persistent memory
   const memoryContext = await getMemoryContext(userMessage);
 
-  // Optionally: Web search for current info
+  // Optionally: Web search for current info. Also gated on the global scraper
+  // toggle — when scraping is off, chat should not fan out to live HTTP
+  // fetches either (same traffic, same timeouts).
   let webContext = "";
-  const useWebSearch = process.env.ENABLE_WEB_SEARCH === "true";
+  const useWebSearch = process.env.ENABLE_WEB_SEARCH === "true" && isScraperEnabled();
   if (useWebSearch) {
     const searchResults = await searchWeb(userMessage, 3);
     webContext = `\n\n=== WEB SEARCH RESULTS ===\n` +

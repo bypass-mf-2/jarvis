@@ -302,7 +302,9 @@ CREATE INDEX IF NOT EXISTS idx_chunkRetrievals_chunkId ON chunk_retrievals(chunk
 CREATE INDEX IF NOT EXISTS idx_conversations_userId ON conversations(userId);
 CREATE INDEX IF NOT EXISTS idx_messages_conversationId ON messages(conversationId);
 CREATE INDEX IF NOT EXISTS idx_knowledgeChunks_sourceUrl ON knowledge_chunks(sourceUrl);
+CREATE INDEX IF NOT EXISTS idx_knowledgeChunks_createdAt ON knowledge_chunks(createdAt);
 CREATE INDEX IF NOT EXISTS idx_scrapeSources_isActive ON scrape_sources(isActive);
+CREATE INDEX IF NOT EXISTS idx_scrapeSources_createdAt ON scrape_sources(createdAt);
 CREATE INDEX IF NOT EXISTS idx_systemLogs_level ON system_logs(level);
 CREATE INDEX IF NOT EXISTS idx_systemLogs_createdAt ON system_logs(createdAt);
 `;

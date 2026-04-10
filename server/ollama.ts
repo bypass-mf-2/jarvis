@@ -12,6 +12,12 @@ import { enqueueOllama } from "./ollamaQueue.js";
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const DEFAULT_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 const EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text";
+// Background/JSON workload model. Separate from the user-chat model so you
+// can run a large reasoning model (gemma4, etc.) for user-facing chat while
+// routing autoTrain/memory-extraction/routing JSON calls to a small, fast
+// model that reliably honors format=json. Falls back to DEFAULT_MODEL when
+// unset, preserving the old single-model behavior.
+const JSON_MODEL = process.env.OLLAMA_JSON_MODEL || DEFAULT_MODEL;
 
 export type OllamaMessage = {
   role: "system" | "user" | "assistant";
@@ -116,9 +122,11 @@ export async function ollamaChat(
 // Use this when the caller needs to JSON.parse() the response. Without
 // format=json, small models commonly wrap output in prose or code fences.
 // Runs at priority 1 (background) so it can't starve user-facing chat.
+// Defaults to JSON_MODEL (OLLAMA_JSON_MODEL env) so you can point this at a
+// small JSON-reliable model while the main chat uses a larger reasoning one.
 export async function ollamaChatJson(
   messages: OllamaMessage[],
-  model: string = DEFAULT_MODEL
+  model: string = JSON_MODEL
 ): Promise<string> {
   const ollamaUp = await isOllamaAvailable();
   if (!ollamaUp) return "";
@@ -131,9 +139,11 @@ export async function ollamaChatJson(
 }
 
 // ── Background chat (priority 1 — memory extraction, model routing) ──────────
+// Also defaults to JSON_MODEL because the callers are all background tasks
+// that don't need user-chat-grade quality and benefit from a faster model.
 export async function ollamaChatBackground(
   messages: OllamaMessage[],
-  model: string = DEFAULT_MODEL
+  model: string = JSON_MODEL
 ): Promise<string> {
   const ollamaUp = await isOllamaAvailable();
   if (!ollamaUp) return "";
@@ -211,4 +221,4 @@ export async function getEmbedding(text: string, model: string = EMBED_MODEL): P
   }
 }
 
-export { DEFAULT_MODEL, EMBED_MODEL };
+export { DEFAULT_MODEL, EMBED_MODEL, JSON_MODEL };
