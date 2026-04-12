@@ -260,7 +260,7 @@ port.on("message", async (msg: any) => {
 // ── Phase 1: Search + scrape ───────────────────────────────────────────────────
 async function handleSearchAndScrape(recentlyUsedTopics: string[]) {
   try {
-    const { queries, topicsUsed } = generateQueries(20, recentlyUsedTopics);
+    const { queries, topicsUsed } = generateQueries(40, recentlyUsedTopics);
 
     // Tell main thread which topics we used
     port.postMessage({ type: "topics-used", topics: topicsUsed });
@@ -273,16 +273,20 @@ async function handleSearchAndScrape(recentlyUsedTopics: string[]) {
     let chunksStored = 0;
     const domainsThisCycle = new Map<string, number>();
 
+    // Collect all URLs to scrape from search results, then scrape concurrently.
+    // Previously this was a double-nested serial loop — each search result
+    // processed 3 URLs sequentially. Now we batch them all and scrape 8 at once.
+    const urlsToScrape: Array<{ url: string; domain: string }> = [];
     for (const result of searchResults) {
       const urls = extractURLsFromResult(result);
       const selected = pickN(urls, 3);
-
       for (const url of selected) {
         const domain = extractDomain(url);
         const domainCount = domainsThisCycle.get(domain) || 0;
         if (domainCount >= 2) continue;
+        domainsThisCycle.set(domain, domainCount + 1);
 
-        // Tell main thread to add to frontier
+        urlsToScrape.push({ url, domain });
         port.postMessage({
           type: "frontier-add",
           url,
@@ -291,26 +295,26 @@ async function handleSearchAndScrape(recentlyUsedTopics: string[]) {
           priority: 0.7 + Math.random() * 0.3,
           discoveredFrom: "search",
         });
-
-        const scraped = await scrapeUrl(url);
-        if (scraped && scraped.chunks.length > 0) {
-          // Send scraped data to main thread for DB storage
-          port.postMessage({
-            type: "scraped-page",
-            url: scraped.url,
-            domain: scraped.domain,
-            chunks: scraped.chunks,
-            sourceTitle: "Search Discovery",
-            discoveredLinks: scraped.discoveredLinks,
-          });
-          pagesScraped++;
-          chunksStored += scraped.chunks.length;
-          domainsThisCycle.set(domain, domainCount + 1);
-        } else {
-          port.postMessage({ type: "frontier-failed", url });
-        }
       }
     }
+
+    await mapConcurrent(urlsToScrape, CRAWL_CONCURRENCY, async ({ url, domain }) => {
+      const scraped = await scrapeUrl(url);
+      if (scraped && scraped.chunks.length > 0) {
+        port.postMessage({
+          type: "scraped-page",
+          url: scraped.url,
+          domain: scraped.domain,
+          chunks: scraped.chunks,
+          sourceTitle: "Search Discovery",
+          discoveredLinks: scraped.discoveredLinks,
+        });
+        pagesScraped++;
+        chunksStored += scraped.chunks.length;
+      } else {
+        port.postMessage({ type: "frontier-failed", url });
+      }
+    });
 
     port.postMessage({
       type: "search-complete",
@@ -323,16 +327,43 @@ async function handleSearchAndScrape(recentlyUsedTopics: string[]) {
   }
 }
 
-// ── Phase 2: Crawl frontier URLs ───────────────────────────────────────────────
+// ── Concurrency helper ────────────────────────────────────────────────────
+// Process an array of items with bounded concurrency. No external dep needed.
+async function mapConcurrent<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIdx = 0;
+
+  async function worker() {
+    while (nextIdx < items.length) {
+      const idx = nextIdx++;
+      results[idx] = await fn(items[idx]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
+// ── Phase 2: Crawl frontier URLs (parallelized) ──────────────────────────────
+const CRAWL_CONCURRENCY = 8;
+
 async function handleCrawlFrontier(urls: Array<{ url: string }>) {
   let pagesScraped = 0;
   let chunksStored = 0;
 
   if (urls.length > 0) {
-    port.postMessage({ type: "log", level: "info", message: `Frontier phase: crawling ${urls.length} URLs` });
+    port.postMessage({
+      type: "log",
+      level: "info",
+      message: `Frontier phase: crawling ${urls.length} URLs (concurrency=${CRAWL_CONCURRENCY})`,
+    });
   }
 
-  for (const entry of urls) {
+  await mapConcurrent(urls, CRAWL_CONCURRENCY, async (entry) => {
     const scraped = await scrapeUrl(entry.url);
     if (scraped && scraped.chunks.length > 0) {
       port.postMessage({
@@ -348,7 +379,7 @@ async function handleCrawlFrontier(urls: Array<{ url: string }>) {
     } else {
       port.postMessage({ type: "frontier-failed", url: entry.url });
     }
-  }
+  });
 
   port.postMessage({
     type: "frontier-complete",

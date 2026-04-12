@@ -412,12 +412,85 @@ async function captureScreenshot(page: Page, taskId: string, step: number): Prom
   }
 }
 
+// ─── Page snapshot ──────────────────────────────────────────────────────────
+// Give the LLM a lightweight structural summary of the current page so it
+// knows what elements exist. Without this, the model is blind and guesses
+// at selectors — producing invalid hybrids like `a:has(text('foo'))`.
+// The snapshot captures headings, links (first 30), inputs, buttons,
+// and the first ~1500 chars of body text. Cheap to extract and fits within
+// the model's context.
+
+async function getPageSnapshot(page: Page): Promise<string> {
+  try {
+    return await page.evaluate(() => {
+      const lines: string[] = [];
+
+      // Headings
+      const headings = Array.from(document.querySelectorAll("h1,h2,h3"));
+      if (headings.length > 0) {
+        lines.push("HEADINGS:");
+        headings.slice(0, 15).forEach((h) => {
+          const text = (h.textContent || "").trim().slice(0, 80);
+          if (text) lines.push(`  ${h.tagName} "${text}"`);
+        });
+      }
+
+      // Input fields
+      const inputs = Array.from(document.querySelectorAll("input,textarea,select,[contenteditable=true]"));
+      if (inputs.length > 0) {
+        lines.push("INPUTS:");
+        inputs.slice(0, 10).forEach((el) => {
+          const tag = el.tagName.toLowerCase();
+          const type = el.getAttribute("type") || "";
+          const name = el.getAttribute("name") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "";
+          const id = el.id ? `#${el.id}` : "";
+          lines.push(`  <${tag}${type ? ` type="${type}"` : ""}${id}${name ? ` name/label="${name}"` : ""}>`);
+        });
+      }
+
+      // Buttons
+      const buttons = Array.from(document.querySelectorAll("button,[role=button],input[type=submit]"));
+      if (buttons.length > 0) {
+        lines.push("BUTTONS:");
+        buttons.slice(0, 15).forEach((b) => {
+          const text = (b.textContent || "").trim().slice(0, 50);
+          const id = b.id ? `#${b.id}` : "";
+          if (text) lines.push(`  "${text}"${id}`);
+        });
+      }
+
+      // Links (first 30)
+      const links = Array.from(document.querySelectorAll("a[href]"));
+      if (links.length > 0) {
+        lines.push(`LINKS (${links.length} total, showing first 30):`);
+        links.slice(0, 30).forEach((a) => {
+          const text = (a.textContent || "").trim().slice(0, 50);
+          const href = a.getAttribute("href") || "";
+          if (text && href) lines.push(`  "${text}" → ${href.slice(0, 80)}`);
+        });
+      }
+
+      // Body text snippet
+      const body = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      if (body.length > 0) {
+        lines.push(`BODY TEXT (first 1500 chars):`);
+        lines.push(body.slice(0, 1500));
+      }
+
+      return lines.join("\n");
+    });
+  } catch {
+    return "(failed to capture page snapshot)";
+  }
+}
+
 // ─── LLM planner ────────────────────────────────────────────────────────────
 
 async function planNextAction(
   run: NavRun,
   currentUrl: string,
-  pageTitle: string
+  pageTitle: string,
+  pageSnapshot: string
 ): Promise<NavAction> {
   const historyLines = run.steps.map(
     (s) =>
@@ -434,42 +507,69 @@ async function planNextAction(
     .map((t) => `  [${t.index}]${t.index === run.currentTabIndex ? " ← current" : ""} ${t.title || "(untitled)"} — ${t.url || "(blank)"}`)
     .join("\n");
 
-  const systemPrompt = `You are JARVIS's browser Navigator agent. Your job is to accomplish the user's goal by driving a real browser through a sequence of one-at-a-time primitive actions. You cannot see the page; you know only extracted text, the current URL, and the tab list.
+  const systemPrompt = `You are JARVIS's browser Navigator agent. You accomplish the user's goal by driving a real Chromium browser one action at a time. You CAN see the page — a structural snapshot (headings, inputs, buttons, links, body text) is provided after each step.
 
-Available action kinds (return exactly one per response):
-- {"kind":"goto","url":"https://...","reasoning":"..."}
-- {"kind":"click","selector":"CSS selector","reasoning":"..."}
-- {"kind":"type","selector":"CSS selector","text":"what to type","reasoning":"..."}
-- {"kind":"press","key":"Enter","reasoning":"..."}
-- {"kind":"scroll","direction":"down","amount":600,"reasoning":"..."}
-- {"kind":"wait","selector":"optional CSS","timeoutMs":10000,"reasoning":"..."}
-- {"kind":"extract","selector":"optional CSS","reasoning":"..."}
-- {"kind":"switchTab","index":N,"reasoning":"..."} — change which tab is current
-- {"kind":"closeTab","index":N,"reasoning":"..."} — close a tab (current if index omitted)
-- {"kind":"done","result":"short answer","reasoning":"..."}
+## Available actions (return exactly ONE as JSON):
 
-Constraints:
-- One action per response. Be decisive.
-- Prefer Playwright's \`text=\` and \`role=\` selectors over fragile CSS.
-- If you've already extracted enough information, call done() — don't keep clicking.
-- If a step failed, try a different selector, don't repeat.
-- If a click opened a new tab (you'll see it in the tab list), switchTab to interact with it.
-- Return ONLY valid JSON. No commentary.`;
+{"kind":"goto","url":"https://example.com","reasoning":"why"}
+{"kind":"click","selector":"text=Click me","reasoning":"why"}
+{"kind":"type","selector":"input[name=q]","text":"search query","reasoning":"why"}
+{"kind":"press","key":"Enter","reasoning":"why"}
+{"kind":"scroll","direction":"down","amount":600,"reasoning":"why"}
+{"kind":"wait","selector":"#results","reasoning":"why"}
+{"kind":"extract","reasoning":"why"}   ← extracts full body text (default, no selector needed)
+{"kind":"extract","selector":"#content","reasoning":"why"}  ← extracts text from a specific element
+{"kind":"switchTab","index":1,"reasoning":"why"}
+{"kind":"closeTab","index":1,"reasoning":"why"}
+{"kind":"done","result":"The answer is X","reasoning":"why"}
 
-  const userPrompt = `Goal: ${run.goal}
+## SELECTOR SYNTAX — CRITICAL, read carefully:
 
-Current tab: ${run.currentTabIndex}
-Current URL: ${currentUrl || "(blank)"}
-Current title: ${pageTitle || "(none)"}
-Steps completed: ${run.steps.length} / ${run.maxSteps}
+Playwright supports THREE separate selector syntaxes. Do NOT mix them.
 
-Tabs:
-${tabList || "  [0] (no tabs yet)"}
+CORRECT examples:
+  text=View history          ← finds element with exact text "View history"
+  text=Early life            ← finds element containing "Early life"
+  role=button[name="Search"] ← finds button with accessible name "Search"
+  #searchInput               ← CSS id selector
+  input[name="q"]            ← CSS attribute selector
+  .mw-search-input           ← CSS class selector
+  h2                         ← CSS tag selector
 
-History:
-${historyLines.length > 0 ? historyLines.join("\n") : "(no steps yet — this is the first action)"}
+WRONG examples (these WILL crash):
+  #mw0 a:has(text('View history'))   ← WRONG: mixing CSS :has() with text()
+  a[text='Click me']                 ← WRONG: text is not an HTML attribute
+  div:contains('Hello')              ← WRONG: :contains() doesn't exist in CSS
 
-What is the next single action?`;
+For clicking links by their text, ALWAYS use: text=Link Text Here
+For clicking buttons, prefer: role=button[name="Button Text"]
+For typing into inputs, use CSS: input[name="q"] or #searchId or input[type="search"]
+
+## Strategy:
+- FIRST action should usually be extract (no selector) to read the page body text, OR goto to navigate somewhere.
+- Use the page snapshot below to pick the right selectors — don't guess.
+- If you already have enough information from extracted text, call done() immediately.
+- If a step errored, use a DIFFERENT selector — read the snapshot for alternatives.
+- Return ONLY valid JSON. No commentary outside the JSON.`;
+
+  const userPrompt = `GOAL: ${run.goal}
+
+CURRENT STATE:
+  Tab: ${run.currentTabIndex}
+  URL: ${currentUrl || "(blank page)"}
+  Title: ${pageTitle || "(none)"}
+  Steps: ${run.steps.length} / ${run.maxSteps}
+
+TABS:
+${tabList || "  [0] (blank)"}
+
+PAGE SNAPSHOT:
+${pageSnapshot.slice(0, 3000)}
+
+HISTORY:
+${historyLines.length > 0 ? historyLines.join("\n") : "(first action — no history yet)"}
+
+What is the single next action? Return JSON only.`;
 
   const raw = await ollamaChatJson([
     { role: "system", content: systemPrompt },
@@ -608,10 +708,11 @@ async function runAgentLoop(taskId: string, signal: AbortSignal): Promise<void> 
       const page = currentPage(state, run);
       const currentUrl = page.url();
       const pageTitle = (await page.title().catch(() => "")) || "";
+      const pageSnapshot = await getPageSnapshot(page);
 
       let action: NavAction;
       try {
-        action = await planNextAction(run, currentUrl, pageTitle);
+        action = await planNextAction(run, currentUrl, pageTitle, pageSnapshot);
       } catch (err) {
         run.status = "failed";
         run.error = `Planner error: ${String(err)}`;

@@ -146,6 +146,48 @@ export async function addToVectorStore(
   }
 }
 
+/**
+ * Store a document with a PRE-COMPUTED embedding. Used by the batch embed
+ * pipeline in scraper.ts where we call getEmbeddingBatch() once for N chunks
+ * and then store each result individually. This avoids double-embedding.
+ */
+export async function addToVectorStoreDirect(
+  id: string,
+  content: string,
+  metadata: Record<string, string>,
+  embedding: number[]
+): Promise<boolean> {
+  const chromaUp = await isChromaAvailable();
+  if (!chromaUp) return false;
+
+  try {
+    await ensureCollection();
+    const collectionId = await getCollectionId();
+    if (!collectionId) return false;
+
+    const res = await fetch(
+      `${CHROMA_BASE}/api/v2/tenants/default_tenant/databases/default_database/collections/${collectionId}/add`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ids: [id],
+          embeddings: [embedding],
+          documents: [content],
+          metadatas: [metadata],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    _chromaAvailable = null;
+    _collectionId = null;
+    _collectionEnsured = false;
+    return false;
+  }
+}
+
 // ── Query vector store ────────────────────────────────────────────────────────
 export type VectorSearchResult = {
   id: string;

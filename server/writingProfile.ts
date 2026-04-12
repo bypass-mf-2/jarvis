@@ -393,20 +393,30 @@ export async function ingestWritingSample(
     wordCount,
   });
 
-  // Style analysis (the slow part). Done synchronously here so the caller
-  // can choose to await or fire-and-forget. Most uploads go through the
-  // fire-and-forget path from uploadRoutes.ts. The user's description is
-  // passed in so the LLM can factor in context (assignment prompt, class,
-  // audience) when judging voice choices.
+  // Style analysis (the slow part). Retries once on failure since the most
+  // common cause is an Ollama timeout when the queue is backed up with
+  // scraper embeddings — a second attempt 15s later usually succeeds because
+  // the queue has drained by then. The user's description is passed in so
+  // the LLM can factor in context (assignment prompt, class, audience).
   let analyzed = false;
-  try {
-    const features = await analyzeSampleStyle(text, category, description);
-    if (features) {
-      await updateWritingSampleFeatures(sampleId, JSON.stringify(features));
-      analyzed = true;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const features = await analyzeSampleStyle(text, category, description);
+      if (features) {
+        await updateWritingSampleFeatures(sampleId, JSON.stringify(features));
+        analyzed = true;
+        break;
+      }
+    } catch (err) {
+      await logger.warn(
+        "writingProfile",
+        `Style analysis attempt ${attempt}/2 failed for sample ${sampleId}: ${err}`
+      );
+      if (attempt < 2) {
+        // Wait 15s before retry — gives the Ollama queue time to drain
+        await new Promise((r) => setTimeout(r, 15_000));
+      }
     }
-  } catch (err) {
-    await logger.warn("writingProfile", `Style analysis failed for sample ${sampleId}: ${err}`);
   }
 
   // Regenerate the aggregate profile so the chat prompt picks up the new

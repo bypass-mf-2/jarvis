@@ -1,11 +1,21 @@
 /**
  * RAG (Retrieval-Augmented Generation) pipeline.
- * Retrieves relevant knowledge chunks from the vector store and injects
- * them into the LLM prompt as context, enabling Jarvis to answer questions
- * based on continuously scraped web knowledge.
+ *
+ * v2: Multi-hop inference. Instead of retrieving 5 chunks by vector
+ * similarity and hoping the answer is in there, this version:
+ *   1. Retrieves 20 chunks via vector search
+ *   2. Extracts entities from the query + those chunks
+ *   3. Traverses the co-occurrence graph 1-2 hops to find related concepts
+ *   4. Pulls chunks linked to the expanded entity set
+ *   5. Re-ranks all candidates by vector similarity + entity relevance + centrality
+ *   6. Feeds the top 25 to Ollama with cross-reference / inference instructions
+ *
+ * The result: a question about "Hitler's economic policies" retrieves chunks
+ * about Hitler, Nazi Party, Weimar Republic, hyperinflation, Treaty of
+ * Versailles, and NSDAP economic program — not just the 5 closest embeddings.
  */
 
-import { queryVectorStore, type VectorSearchResult } from "./vectorStore";
+import { type VectorSearchResult } from "./vectorStore";
 import { ollamaChat, ollamaChatStream, type OllamaMessage } from "./ollama";
 import { logger } from "./logger";
 import { getMemoryContext } from "./persistentMemory";
@@ -14,31 +24,49 @@ import { isScraperEnabled } from "./scraper.js";
 import { smartRouteModel } from "./autoTrain.js";
 import { recordChunkRetrieval, incrementDomainRetrievals } from "./db";
 import { getWritingProfileSystemPrompt } from "./writingProfile.js";
+import { multiHopRetrieval, buildInferenceContext } from "./inferenceEngine.js";
 
-const JARVIS_SYSTEM_PROMPT = `You are JARVIS (Just A Rather Very Intelligent System), a highly capable AI assistant inspired by Tony Stark's AI. You are helpful, precise, and occasionally witty. You have access to a continuously updated knowledge base scraped from the internet.
+const JARVIS_SYSTEM_PROMPT = `You are JARVIS (Just A Rather Very Intelligent System), a highly capable AI assistant inspired by Tony Stark's AI. You are helpful, precise, and occasionally witty. You have access to a continuously updated knowledge base with a knowledge graph connecting concepts, people, events, and technologies across 65,000+ source documents.
 
 When answering:
 - Be direct and informative
-- Reference your knowledge base context when relevant
-- Acknowledge uncertainty when you don't know something
+- Cross-reference multiple sources when available — note agreements and contradictions
+- Draw inferences by chaining facts from different sources
+- Acknowledge uncertainty when evidence is thin or contradictory
+- Cite sources by their [N] numbers when making specific claims
 - Use markdown formatting for clarity
 - Keep responses concise unless detail is explicitly requested`;
 
 // ── Build augmented prompt ────────────────────────────────────────────────────
 async function buildAugmentedMessages(
   userMessage: string,
-  conversationHistory: OllamaMessage[],
-  topK = 5
-): Promise<{ messages: OllamaMessage[]; ragChunks: VectorSearchResult[] }> {
-  // Retrieve relevant knowledge
-  const ragChunks = await queryVectorStore(userMessage, topK);
+  conversationHistory: OllamaMessage[]
+): Promise<{
+  messages: OllamaMessage[];
+  ragChunks: VectorSearchResult[];
+  inferenceStats?: any;
+}> {
+  // Multi-hop inference retrieval (replaces the old queryVectorStore(msg, 5))
+  const inferenceResult = await multiHopRetrieval(userMessage);
 
-  // ✅ ADD THIS: Get persistent memory
+  // Convert inference chunks to VectorSearchResult shape for backward compat
+  // with the streaming metadata yield and chunk-retrieval tracking.
+  const ragChunks: VectorSearchResult[] = inferenceResult.chunks.map((c) => ({
+    id: c.chromaId,
+    content: c.content,
+    metadata: {
+      id: String(c.id),
+      sourceUrl: c.sourceUrl,
+      sourceTitle: c.sourceTitle,
+      sourceType: c.sourceType,
+    },
+    distance: 1 - c.score,
+  }));
+
+  // Persistent memory
   const memoryContext = await getMemoryContext(userMessage);
 
-  // Optionally: Web search for current info. Also gated on the global scraper
-  // toggle — when scraping is off, chat should not fan out to live HTTP
-  // fetches either (same traffic, same timeouts).
+  // Web search (gated on scraper toggle)
   let webContext = "";
   const useWebSearch = process.env.ENABLE_WEB_SEARCH === "true" && isScraperEnabled();
   if (useWebSearch) {
@@ -49,30 +77,22 @@ async function buildAugmentedMessages(
 
   let systemContent = JARVIS_SYSTEM_PROMPT;
 
-  // ✅ ADD WORLD CLOCK AND TIMEZONE INFO
+  // World clock
   const now = new Date();
   const timeInfo = `\n\n=== CURRENT DATE & TIME ===
 Current UTC Time: ${now.toUTCString()}
 Current Local Time: ${now.toLocaleString('en-US', { timeZone: 'America/Denver', timeZoneName: 'short' })}
-Unix Timestamp: ${now.getTime()}
 ISO 8601: ${now.toISOString()}
-
-Note: All message timestamps in the conversation history are in milliseconds since Unix epoch. 
-You can use this to understand the chronological order of events and calculate time differences.
 === END TIME INFO ===`;
 
   systemContent += timeInfo;
 
-    // ✅ ADD THIS: Include memory in system prompt
+  // Persistent memory
   if (memoryContext) {
     systemContent += "\n\n" + memoryContext;
   }
 
-  // ✅ USER VOICE PROFILE: if the user has uploaded writing samples, inject
-  // the aggregated style profile so Jarvis mirrors their voice. These are
-  // samples uploaded via /writing-profile — completely separate from RAG
-  // content. The helper returns "" when no samples exist, so this is a
-  // no-op cost for users who haven't set up a profile.
+  // Writing voice profile
   try {
     const voicePrompt = await getWritingProfileSystemPrompt();
     if (voicePrompt) {
@@ -98,39 +118,32 @@ You can use this to understand the chronological order of events and calculate t
     } catch { /* non-critical tracking */ }
   }
 
-  if (ragChunks.length > 0) {
-    const contextBlock = ragChunks
-      .map((c, i) => {
-        const source = c.metadata.sourceTitle || c.metadata.sourceUrl || "Unknown";
-        return `[${i + 1}] Source: ${source}\n${c.content}`;
-      })
-      .join("\n\n---\n\n");
-
-    systemContent += `\n\n=== KNOWLEDGE BASE CONTEXT ===\nThe following information was retrieved from your knowledge base. Use it to inform your response:\n\n${contextBlock}\n\n=== END CONTEXT ===`;
+  // Multi-hop inference context (replaces the old simple chunk block)
+  const inferenceContext = buildInferenceContext(inferenceResult);
+  if (inferenceContext) {
+    systemContent += "\n\n" + inferenceContext;
   }
 
-  // Add web search
+  // Web search results
   if (webContext) {
     systemContent += webContext;
   }
 
   const messages: OllamaMessage[] = [
     { role: "system", content: systemContent },
-    ...conversationHistory.slice(-10).map((msg, idx) => {
-      // Add timestamp info to help AI understand chronology
-      // If message has createdAt, include it
+    ...conversationHistory.slice(-10).map((msg) => {
       const msgWithTime = msg as any;
       if (msgWithTime.createdAt) {
         const msgDate = new Date(msgWithTime.createdAt);
         const timeAgo = Math.floor((Date.now() - msgDate.getTime()) / 1000);
-        const timeStr = timeAgo < 60 
-          ? `${timeAgo}s ago` 
-          : timeAgo < 3600 
+        const timeStr = timeAgo < 60
+          ? `${timeAgo}s ago`
+          : timeAgo < 3600
           ? `${Math.floor(timeAgo / 60)}m ago`
           : timeAgo < 86400
           ? `${Math.floor(timeAgo / 3600)}h ago`
           : `${Math.floor(timeAgo / 86400)}d ago`;
-        
+
         return {
           role: msg.role,
           content: `[${timeStr}] ${msg.content}`
@@ -141,7 +154,7 @@ You can use this to understand the chronological order of events and calculate t
     { role: "user", content: userMessage },
   ];
 
-  return { messages, ragChunks };
+  return { messages, ragChunks, inferenceStats: inferenceResult.stats };
 }
 
 // ── Non-streaming RAG chat ────────────────────────────────────────────────────
@@ -152,17 +165,22 @@ export async function ragChat(
 ): Promise<{ response: string; ragChunks: VectorSearchResult[] }> {
   await logger.info("rag", `Processing query: "${userMessage.slice(0, 80)}..."`);
 
-  const { messages, ragChunks } = await buildAugmentedMessages(
+  const { messages, ragChunks, inferenceStats } = await buildAugmentedMessages(
     userMessage,
     conversationHistory
   );
-  // Smart model selection (unless overridden)
+
+  if (inferenceStats) {
+    await logger.info(
+      "rag",
+      `Inference: ${inferenceStats.vectorCandidates} vector + ${inferenceStats.entityCandidates} entity → ${inferenceStats.finalChunks} final (${inferenceStats.durationMs}ms, ${inferenceStats.graphHopsUsed} hops)`
+    );
+  }
+
   const model = modelOverride || await smartRouteModel(userMessage);
-
   logger.info("rag", `Using model: ${model} for query: ${userMessage.slice(0, 50)}...`);
-  // Get response
-  const response = await ollamaChat(messages, model);
 
+  const response = await ollamaChat(messages, model);
   return { response, ragChunks };
 }
 
@@ -177,10 +195,8 @@ export async function* ragChatStream(
     conversationHistory
   );
 
-  // First yield metadata (RAG sources used)
   yield { type: "meta", data: ragChunks };
 
-  // Then stream the response
   for await (const chunk of ollamaChatStream(messages, model)) {
     yield { type: "chunk", data: chunk };
   }

@@ -31,7 +31,7 @@ let _activeUserCount = 0;
 // (priority 0) to be able to ALSO hold an HTTP slot while a priority-2
 // embedding runs, so Ollama picks up the chat immediately when the embed
 // finishes instead of waiting for our queue to re-dispatch.
-const MAX_CONCURRENT = 2;
+const MAX_CONCURRENT = 4;
 
 // Any priority >= this is treated as "background" and held back whenever
 // a user chat (priority 0) is pending or executing. Set to 1 so that

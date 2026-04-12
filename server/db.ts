@@ -569,6 +569,41 @@ export async function markFrontierFailed(url: string) {
   sqliteRun("UPDATE crawl_frontier SET status = 'failed' WHERE url = ?", [url]);
 }
 
+/**
+ * Prune the crawl frontier to prevent unbounded growth. Deletes the oldest,
+ * lowest-priority pending entries above the cap. Also deletes "scraped"
+ * entries older than 30 days (they've already been processed and their URLs
+ * are in knowledge_chunks — keeping them just bloats the table).
+ */
+export async function pruneFrontier(maxPending: number = 10_000): Promise<number> {
+  // Delete old completed entries (> 30 days)
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  sqliteRun(
+    "DELETE FROM crawl_frontier WHERE status IN ('scraped', 'failed') AND scrapedAt < ?",
+    [thirtyDaysAgo]
+  );
+
+  // If pending count exceeds cap, delete the lowest-priority excess
+  const pendingRows = sqliteRun(
+    "SELECT COUNT(*) as c FROM crawl_frontier WHERE status = 'pending'"
+  );
+  const pendingCount = (pendingRows[0]?.c as number) ?? 0;
+  if (pendingCount <= maxPending) return 0;
+
+  const excess = pendingCount - maxPending;
+  // Delete the oldest, lowest-priority pending entries
+  sqliteRun(
+    `DELETE FROM crawl_frontier WHERE id IN (
+       SELECT id FROM crawl_frontier
+       WHERE status = 'pending'
+       ORDER BY priority ASC, createdAt ASC
+       LIMIT ?
+     )`,
+    [excess]
+  );
+  return excess;
+}
+
 export async function getFrontierStats(): Promise<{ pending: number; scraped: number; failed: number }> {
   const rows = sqliteRun("SELECT status, COUNT(*) as count FROM crawl_frontier GROUP BY status");
   const stats = { pending: 0, scraped: 0, failed: 0 };
@@ -1071,5 +1106,139 @@ export async function listNavAuditLog(limit: number = 100): Promise<any[]> {
     "SELECT * FROM nav_audit_log ORDER BY createdAt DESC LIMIT ?",
     [limit]
   ) as any[];
+}
+
+// ── Knowledge Graph: Entities + Relationships ───────────────────────────────
+// These power the multi-hop inference engine. Built by entityExtractor.ts
+// (fast NER on ingest), queried by inferenceEngine.ts at chat time.
+
+export function upsertEntity(name: string, normalizedName: string, type: string): number {
+  const existing = sqliteRun(
+    "SELECT id, mentionCount FROM entities WHERE normalizedName = ? LIMIT 1",
+    [normalizedName]
+  );
+  if (existing.length > 0) {
+    sqliteRun(
+      "UPDATE entities SET mentionCount = mentionCount + 1, lastSeenAt = ? WHERE id = ?",
+      [Date.now(), existing[0].id]
+    );
+    return existing[0].id as number;
+  }
+  return sqliteInsert(
+    "INSERT INTO entities (name, normalizedName, type, mentionCount, firstSeenAt, lastSeenAt, createdAt) VALUES (?, ?, ?, 1, ?, ?, ?)",
+    [name, normalizedName, type, Date.now(), Date.now(), Date.now()]
+  );
+}
+
+export function linkEntityToChunk(entityId: number, chunkId: number): void {
+  try {
+    sqliteInsert(
+      "INSERT OR IGNORE INTO entity_chunk_links (entityId, chunkId) VALUES (?, ?)",
+      [entityId, chunkId]
+    );
+  } catch { /* duplicate — ignore */ }
+}
+
+export function upsertEntityRelationship(entityAId: number, entityBId: number): void {
+  // Always store with smaller ID first so (A,B) and (B,A) are the same row.
+  const a = Math.min(entityAId, entityBId);
+  const b = Math.max(entityAId, entityBId);
+  if (a === b) return;
+  const existing = sqliteRun(
+    "SELECT id FROM entity_relationships WHERE entityAId = ? AND entityBId = ? LIMIT 1",
+    [a, b]
+  );
+  if (existing.length > 0) {
+    sqliteRun(
+      "UPDATE entity_relationships SET strength = strength + 1, sharedChunkCount = sharedChunkCount + 1 WHERE id = ?",
+      [existing[0].id]
+    );
+  } else {
+    sqliteInsert(
+      "INSERT INTO entity_relationships (entityAId, entityBId, strength, sharedChunkCount) VALUES (?, ?, 1, 1)",
+      [a, b]
+    );
+  }
+}
+
+export function getRelatedEntities(entityId: number, limit: number = 20): Array<{
+  entityId: number;
+  name: string;
+  normalizedName: string;
+  type: string;
+  mentionCount: number;
+  strength: number;
+}> {
+  return sqliteRun(
+    `SELECT e.id as entityId, e.name, e.normalizedName, e.type, e.mentionCount, r.strength
+     FROM entity_relationships r
+     JOIN entities e ON e.id = CASE WHEN r.entityAId = ? THEN r.entityBId ELSE r.entityAId END
+     WHERE r.entityAId = ? OR r.entityBId = ?
+     ORDER BY r.strength DESC
+     LIMIT ?`,
+    [entityId, entityId, entityId, limit]
+  ) as any[];
+}
+
+export function getEntityChunkIds(entityId: number, limit: number = 50): number[] {
+  const rows = sqliteRun(
+    "SELECT chunkId FROM entity_chunk_links WHERE entityId = ? LIMIT ?",
+    [entityId, limit]
+  );
+  return rows.map((r: any) => r.chunkId as number);
+}
+
+export function searchEntities(query: string, limit: number = 20): Array<{
+  id: number;
+  name: string;
+  normalizedName: string;
+  type: string;
+  mentionCount: number;
+}> {
+  const normalized = query.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim();
+  return sqliteRun(
+    `SELECT id, name, normalizedName, type, mentionCount
+     FROM entities
+     WHERE normalizedName LIKE ?
+     ORDER BY mentionCount DESC
+     LIMIT ?`,
+    [`%${normalized}%`, limit]
+  ) as any[];
+}
+
+export function getChunksByIds(ids: number[]): any[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  return sqliteRun(
+    `SELECT * FROM knowledge_chunks WHERE id IN (${placeholders})`,
+    ids
+  );
+}
+
+export function getGraphMeta(): { lastBackfillChunkId: number; totalEntities: number; totalRelationships: number } | null {
+  const rows = sqliteRun("SELECT * FROM entity_graph_meta WHERE id = 1 LIMIT 1");
+  return rows.length > 0 ? rows[0] as any : null;
+}
+
+export function updateGraphMeta(lastChunkId: number, totalEntities: number, totalRelationships: number): void {
+  const existing = sqliteRun("SELECT id FROM entity_graph_meta WHERE id = 1 LIMIT 1");
+  if (existing.length > 0) {
+    sqliteRun(
+      "UPDATE entity_graph_meta SET lastBackfillChunkId = ?, totalEntities = ?, totalRelationships = ?, lastBackfillAt = ? WHERE id = 1",
+      [lastChunkId, totalEntities, totalRelationships, Date.now()]
+    );
+  } else {
+    sqliteRun(
+      "INSERT INTO entity_graph_meta (id, lastBackfillChunkId, totalEntities, totalRelationships, lastBackfillAt, createdAt) VALUES (1, ?, ?, ?, ?, ?)",
+      [lastChunkId, totalEntities, totalRelationships, Date.now(), Date.now()]
+    );
+  }
+}
+
+export function getEntityStats(): { entities: number; links: number; relationships: number } {
+  const e = sqliteRun("SELECT COUNT(*) as c FROM entities")[0]?.c ?? 0;
+  const l = sqliteRun("SELECT COUNT(*) as c FROM entity_chunk_links")[0]?.c ?? 0;
+  const r = sqliteRun("SELECT COUNT(*) as c FROM entity_relationships")[0]?.c ?? 0;
+  return { entities: e as number, links: l as number, relationships: r as number };
 }
 

@@ -33,6 +33,7 @@ import {
   getDomainScore,
   getTopDomains,
   recomputeDomainQualityScores,
+  pruneFrontier,
 } from "./db";
 import { getScraperStats, getTotalScrapingCost } from "./aggressiveScraper.js";
 import { isScraperEnabled } from "./scraper.js";
@@ -243,23 +244,47 @@ async function runDiscoveryCycle(): Promise<void> {
   _crawling = true;
 
   try {
-    // Improvement ④: recompute domain quality scores from retrieval data
-    // before fetching top domains. Without this, quality_score sits at the
-    // default 0.5 forever and handleSeedFromDomains seeds from arbitrary
-    // domains instead of the ones RAG actually uses.
+    // Housekeeping: recompute domain quality scores from retrieval data,
+    // and prune the frontier if it's gotten too large. Both run before the
+    // main cycle so the planner sees accurate scores and queue size.
     try {
       const scored = await recomputeDomainQualityScores();
-      await logger.info("sourceDiscovery", `Recomputed quality scores for ${scored} domains`);
+      const pruned = await pruneFrontier(10_000);
+      if (pruned > 0) {
+        await logger.info("sourceDiscovery", `Pruned ${pruned} low-priority frontier URLs (cap 10k)`);
+      }
+      await logger.info("sourceDiscovery", `Quality scores recomputed for ${scored} domains`);
     } catch (err) {
-      await logger.warn("sourceDiscovery", `Quality recompute failed: ${String(err)}`);
+      await logger.warn("sourceDiscovery", `Housekeeping failed: ${String(err)}`);
     }
 
     const worker = getWorker();
     const recentlyUsedTopics = await getRecentlyUsedTopics(6 * 60 * 60 * 1000);
 
+    // Check frontier size to decide strategy. If the queue is already huge,
+    // skip the search phase (which adds ~600 URLs) and spend all the cycle
+    // budget on draining what we already have. This prevents unbounded
+    // queue growth that was hitting 19k+ pending.
+    const fStatsPreCycle = await getFrontierStats();
+    const queueIsHuge = fStatsPreCycle.pending > 2000;
+    const skipSearch = queueIsHuge;
+
+    if (skipSearch) {
+      await logger.info(
+        "sourceDiscovery",
+        `Frontier has ${fStatsPreCycle.pending} pending — skipping search phase to drain queue`
+      );
+    }
+
     // Collect stats from both phases
     let searchStats = { pagesScraped: 0, chunksStored: 0 };
     let frontierStats = { pagesScraped: 0, chunksStored: 0 };
+
+    // Pre-fetch frontier URLs for the skipSearch path (needs to happen
+    // outside the non-async promise constructor callback).
+    const prefetchedFrontier = skipSearch
+      ? await getNextFrontierUrls(150, 5)
+      : null;
 
     // Run search phase, then frontier phase, then optionally RSS
     await new Promise<void>((resolve, reject) => {
@@ -267,7 +292,9 @@ async function runDiscoveryCycle(): Promise<void> {
         reject(new Error("Crawl cycle timed out after 10 minutes"));
       }, 10 * 60 * 1000);
 
-      let phase: "search" | "frontier" | "seed" | "rss" | "done" = "search";
+      // When queue is large, jump straight to frontier draining instead of
+      // doing another search-and-scrape cycle that would add more URLs.
+      let phase: "search" | "frontier" | "seed" | "rss" | "done" = skipSearch ? "frontier" : "search";
 
       const onMessage = async (msg: any) => {
         try {
@@ -282,10 +309,17 @@ async function runDiscoveryCycle(): Promise<void> {
           // Phase transitions
           if (msg.type === "search-complete") {
             searchStats = { pagesScraped: msg.pagesScraped, chunksStored: msg.chunksStored };
-
-            // Start frontier phase
+            // Fall through to start frontier phase
             phase = "frontier";
-            const frontierUrls = await getNextFrontierUrls(15, 2);
+          }
+
+          // Frontier drain — process a big batch now. Increased from 15 to
+          // 75 so we actually make a dent in the queue. With ~5s per URL
+          // this takes ~6 min, well within the 10-min cycle timeout. Domain
+          // cap raised from 2 to 5 so we don't artificially bottleneck
+          // high-value domains.
+          if (phase === "frontier" && (msg.type === "search-complete" || msg.type === "ready")) {
+            const frontierUrls = await getNextFrontierUrls(150, 5);
 
             if (frontierUrls.length === 0) {
               // Seed from top domains instead
@@ -298,6 +332,7 @@ async function runDiscoveryCycle(): Promise<void> {
                 phase = "done";
               }
             } else {
+              await logger.info("sourceDiscovery", `Frontier phase: sending ${frontierUrls.length} URLs to worker`);
               worker.postMessage({ type: "crawl-frontier", urls: frontierUrls });
             }
           }
@@ -311,19 +346,16 @@ async function runDiscoveryCycle(): Promise<void> {
             phase = "done";
           }
 
-          if (msg.type === "rss-complete") {
-            phase = "done";
+          // After search+frontier phases complete, always run RSS discovery
+          // so new feeds are found every cycle (was random 20%).
+          if (phase === "done") {
+            phase = "rss";
+            worker.postMessage({ type: "discover-rss", recentlyUsedTopics });
+            return; // wait for rss-complete
           }
 
-          // After main phases complete, optionally run RSS discovery
-          if (phase === "done") {
-            if (Math.random() < 0.2) {
-              phase = "rss";
-              worker.postMessage({ type: "discover-rss", recentlyUsedTopics });
-              return; // wait for rss-complete
-            }
-
-            // All done
+          // RSS phase is the final phase — resolve when it completes.
+          if (phase === "rss" && msg.type === "rss-complete") {
             clearTimeout(timeout);
             worker.off("message", onMessage);
             resolve();
@@ -337,8 +369,22 @@ async function runDiscoveryCycle(): Promise<void> {
 
       worker.on("message", onMessage);
 
-      // Kick off the search phase
-      worker.postMessage({ type: "search-and-scrape", recentlyUsedTopics });
+      if (skipSearch && prefetchedFrontier) {
+        // Go straight to frontier draining — send the pre-fetched batch
+        // directly instead of doing a search cycle that adds more URLs.
+        if (prefetchedFrontier.length > 0) {
+          logger.info("sourceDiscovery", `Drain mode: sending ${prefetchedFrontier.length} frontier URLs`);
+          worker.postMessage({ type: "crawl-frontier", urls: prefetchedFrontier });
+        } else {
+          phase = "done";
+          clearTimeout(timeout);
+          worker.off("message", onMessage);
+          resolve();
+        }
+      } else {
+        // Normal mode: search first, then frontier
+        worker.postMessage({ type: "search-and-scrape", recentlyUsedTopics });
+      }
     });
 
     // Log results

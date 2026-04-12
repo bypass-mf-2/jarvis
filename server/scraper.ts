@@ -25,13 +25,15 @@ import {
 // couldn't be parsed at all — NOT "items found but all duplicates", which
 // is normal behavior for healthy RSS feeds with no new posts.
 const ZERO_SCRAPE_DISABLE_THRESHOLD = 5;
-import { addToVectorStore } from "./vectorStore";
+import { addToVectorStore, addToVectorStoreDirect } from "./vectorStore";
+import { getEmbeddingBatch } from "./ollama";
 import { logger } from "./logger";
 import { fetchWithRetry } from "./webSearch";
 import { recordEvent as recordImprovementEvent } from "./improvementFeed";
 import { chunkText } from "./chunking";
 import { extractReadableContent } from "./htmlExtract";
 import { discoverSitemapUrls, filterCrawlableUrls } from "./sitemap";
+import { processChunkForEntities } from "./entityExtractor";
 
 // Sitemap probing is per-ORIGIN (not per-source-URL) so adding many landing
 // pages from the same domain — e.g., 14 W3Schools topic pages — triggers
@@ -259,6 +261,10 @@ async function scrapeURL(url: string): Promise<{ title: string; content: string 
 }
 
 // ── Queue of chunks waiting to be embedded (processed in background) ─────────
+// v2: batch processing. Instead of 1-at-a-time with a 200ms sleep, we send
+// batches of 16 to Ollama in a single request. Throughput goes from ~5/sec
+// to ~50-80/sec depending on model and hardware. The Ollama priority queue
+// already handles yielding to user chat — no need for artificial sleeps here.
 interface PendingEmbed {
   chromaId: string;
   content: string;
@@ -266,31 +272,48 @@ interface PendingEmbed {
 }
 const _embedQueue: PendingEmbed[] = [];
 let _embeddingInProgress = false;
+const EMBED_BATCH_SIZE = 16;
 
-// Process embed queue in background — 1 chunk at a time with pauses
-// so Ollama stays responsive for user chat
 async function processEmbedQueue(): Promise<void> {
   if (_embeddingInProgress || _embedQueue.length === 0) return;
   _embeddingInProgress = true;
 
   try {
     while (_embedQueue.length > 0) {
-      const item = _embedQueue.shift()!;
+      // Grab a batch
+      const batch = _embedQueue.splice(0, EMBED_BATCH_SIZE);
+
       try {
-        await addToVectorStore(item.chromaId, item.content, item.metadata);
-      } catch {
-        // skip failed embeds
+        // Get all embeddings in one Ollama request
+        const embeddings = await getEmbeddingBatch(batch.map((b) => b.content));
+
+        // Store each result in ChromaDB
+        for (let i = 0; i < batch.length; i++) {
+          const item = batch[i];
+          const embedding = embeddings[i];
+          if (!embedding || embedding.length === 0) continue;
+
+          try {
+            await addToVectorStoreDirect(item.chromaId, item.content, item.metadata, embedding);
+          } catch {
+            // skip failed stores
+          }
+        }
+      } catch (err) {
+        // Batch embedding failed entirely. Push items back so they can
+        // retry on the next tick. Log once, don't flood.
+        _embedQueue.unshift(...batch);
+        await logger.warn("scraper", `Batch embed failed (${batch.length} items), will retry: ${String(err).slice(0, 100)}`);
+        break; // Exit and retry on next polling tick
       }
-      // Small pause between embeds to let user chat requests through
-      await new Promise((r) => setTimeout(r, 200));
     }
   } finally {
     _embeddingInProgress = false;
   }
 }
 
-// Start background embed processor (runs every 10s)
-setInterval(() => processEmbedQueue(), 10_000);
+// Poll every 2s (was 10s — a 5x latency reduction for when the queue has items)
+setInterval(() => processEmbedQueue(), 2_000);
 
 // ── Store chunks to DB (embedding is queued for background) ─────────────────
 async function storeChunks(
@@ -336,6 +359,17 @@ async function storeChunks(
           sourceType,
         },
       });
+
+      // Extract entities and update the knowledge graph in real time.
+      // processChunkForEntities is pure JS (~1ms) so it doesn't slow
+      // the scrape loop down. The entity graph stays current as new
+      // chunks arrive instead of waiting for a full backfill.
+      try {
+        const chunkId = typeof row === "object" && row !== null
+          ? (row as any).id ?? 0
+          : typeof row === "number" ? row : 0;
+        if (chunkId > 0) processChunkForEntities(chunkId, chunk);
+      } catch { /* non-critical — backfill will catch it */ }
 
       stored++;
     } catch (err) {
@@ -516,16 +550,17 @@ export function startScraperScheduler(intervalMs: number = 60_000): void {
       // success/error result. Do NOT overwrite it here, and do NOT additionally
       // re-scrape every source via scrapeAllSources() — that was a double-scrape bug.
       //
-      // Check _scraperEnabled BETWEEN sources so that toggling the switch off
-      // mid-cycle stops within seconds instead of burning through all 60+ due
-      // sources (each generating dozens of embedding calls that starve Ollama
-      // and make the user's chat time out).
-      for (const source of due) {
+      // Scrape up to 5 sources concurrently. This cuts a cycle with 60+ due
+      // sources from ~60 serial fetches (~5 min) to ~12 batches (~1 min).
+      // Still checks _scraperEnabled between batches so the toggle works.
+      const SCRAPE_CONCURRENCY = 5;
+      for (let i = 0; i < due.length; i += SCRAPE_CONCURRENCY) {
         if (!_scraperEnabled) {
           await logger.info("scraper", "Aborting in-flight scrape cycle (scraper disabled mid-cycle)");
           break;
         }
-        await scrapeSource(source);
+        const batch = due.slice(i, i + SCRAPE_CONCURRENCY);
+        await Promise.allSettled(batch.map((source: any) => scrapeSource(source)));
       }
     } finally {
       _scraperRunning = false;

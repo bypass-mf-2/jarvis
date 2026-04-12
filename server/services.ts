@@ -15,6 +15,7 @@ import { startSourceDiscoveryScheduler } from "./sourceDiscovery.js";
 import {
   startAutoTraining,
 } from "./autoTrain.js";
+import { backfillEntityGraph, loadGraph } from "./entityExtractor.js";
 
 // Default sources to seed on first run — focused on research, science, and programming knowledge.
 // Mix of RSS feeds (auto-polled) and custom_url pages (scraped once, links harvested).
@@ -187,9 +188,34 @@ export async function startBackgroundServices(): Promise<void> {
   startAutoTraining(7 * 24 * 60 * 60 * 1000);
   await logger.info("services", "✅ Auto-training started (weekly)");
 
-  // Start source discovery (every 1 minute)
-  startSourceDiscoveryScheduler(30* 60 * 1000);
-  await logger.info("services", "✅ Source discovery started (1 min intervals)");
+  // Start source discovery (every 10 minutes — was 30m, reduced to drain
+  // the frontier faster and discover new sources more aggressively)
+  startSourceDiscoveryScheduler(10 * 60 * 1000);
+  await logger.info("services", "✅ Source discovery started (10 min intervals)");
+
+  // Load the entity graph from disk (entity-graph.json). Must happen before
+  // the backfill and before any chat queries that use the inference engine.
+  loadGraph();
+
+  // Build / update entity knowledge graph. This processes all existing chunks
+  // through fast NER (pure JavaScript, no LLM) to extract entities and build
+  // co-occurrence relationships. First run on 66k chunks takes ~2-3 minutes;
+  // subsequent starts are instant (resumes from last checkpoint).
+  // Runs in background so it doesn't block server startup.
+  backfillEntityGraph()
+    .then((result) => {
+      if (result.chunksProcessed > 0) {
+        logger.info(
+          "services",
+          `✅ Entity graph built: ${result.entitiesFound.toLocaleString()} entities, ${result.relationshipsBuilt.toLocaleString()} relationships from ${result.chunksProcessed.toLocaleString()} chunks (${(result.durationMs / 1000).toFixed(1)}s)`
+        );
+      } else {
+        logger.info("services", `✅ Entity graph up to date`);
+      }
+    })
+    .catch((err) => {
+      logger.warn("services", `Entity graph backfill failed: ${String(err)}`);
+    });
 
   await logger.info("services", "🚀 ALL SYSTEMS ONLINE - JARVIS FULLY ACTIVATED");
 }

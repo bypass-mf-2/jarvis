@@ -295,6 +295,65 @@ CREATE TABLE IF NOT EXISTS domain_scores (
 );
 CREATE INDEX IF NOT EXISTS idx_domainScores_quality ON domain_scores(quality_score);
 
+-- ── Knowledge graph ──────────────────────────────────────────────────────
+-- Entity storage: every proper noun, concept, technology, organization,
+-- person, and event extracted from knowledge_chunks lives here. Built
+-- by the fast NER in entityExtractor.ts — no LLM required for the bulk
+-- of the work.
+CREATE TABLE IF NOT EXISTS entities (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  normalizedName TEXT NOT NULL,
+  type TEXT DEFAULT 'unknown',
+  mentionCount INTEGER DEFAULT 0,
+  firstSeenAt INTEGER,
+  lastSeenAt INTEGER,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalizedName);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+CREATE INDEX IF NOT EXISTS idx_entities_mentions ON entities(mentionCount DESC);
+
+-- Entity ↔ chunk links: which entities appear in which chunks.
+-- The join table that powers "give me all chunks about Tesla".
+CREATE TABLE IF NOT EXISTS entity_chunk_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entityId INTEGER NOT NULL,
+  chunkId INTEGER NOT NULL,
+  UNIQUE(entityId, chunkId)
+);
+CREATE INDEX IF NOT EXISTS idx_ecl_entityId ON entity_chunk_links(entityId);
+CREATE INDEX IF NOT EXISTS idx_ecl_chunkId ON entity_chunk_links(chunkId);
+
+-- Entity ↔ entity co-occurrence: when two entities appear in the same
+-- chunk, they get a relationship. Strength = number of shared chunks.
+-- This IS the knowledge graph — it's what enables multi-hop retrieval.
+-- "Hitler" → co-occurs with "Nazi Party" in 47 chunks, "Weimar Republic"
+-- in 12 chunks, "World War II" in 89 chunks → follow those edges to
+-- expand a query about Hitler into related topics automatically.
+CREATE TABLE IF NOT EXISTS entity_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entityAId INTEGER NOT NULL,
+  entityBId INTEGER NOT NULL,
+  strength REAL DEFAULT 1.0,
+  sharedChunkCount INTEGER DEFAULT 1,
+  UNIQUE(entityAId, entityBId)
+);
+CREATE INDEX IF NOT EXISTS idx_er_entityA ON entity_relationships(entityAId);
+CREATE INDEX IF NOT EXISTS idx_er_entityB ON entity_relationships(entityBId);
+CREATE INDEX IF NOT EXISTS idx_er_strength ON entity_relationships(strength DESC);
+
+-- Track whether the entity graph has been built. The backfill processes
+-- all existing chunks once; subsequent chunks get extracted incrementally.
+CREATE TABLE IF NOT EXISTS entity_graph_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  lastBackfillChunkId INTEGER DEFAULT 0,
+  totalEntities INTEGER DEFAULT 0,
+  totalRelationships INTEGER DEFAULT 0,
+  lastBackfillAt INTEGER,
+  createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
 -- ── Navigator sessions ───────────────────────────────────────────────────
 -- Stored Playwright storageState blobs — cookies + localStorage from a
 -- headed browser session where the user manually logged in. When a task
@@ -452,8 +511,11 @@ function registerShutdownHandlers(): void {
     // Use flushDatabase (unconditional) for shutdown so we always persist,
     // even if the dirty flag was somehow out of sync.
     try { flushDatabase(); } catch (e) { console.error("final save failed:", e); }
+    // Save the in-memory entity graph to disk before exit.
+    import("./entityExtractor.js")
+      .then((m) => m.saveGraph?.())
+      .catch(() => { /* module may not be loaded */ });
     // Close any Playwright browser instances launched by the Navigator.
-    // Done via dynamic import so sqlite-init has no hard dep on navigator.
     import("./navigator.js")
       .then((m) => m.shutdownNavigator?.())
       .catch(() => { /* module may not be loaded */ });

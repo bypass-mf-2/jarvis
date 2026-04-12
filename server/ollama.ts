@@ -167,7 +167,7 @@ export async function ollamaChatJson(
   const ollamaUp = await isOllamaAvailable();
   if (!ollamaUp) return "";
   try {
-    return await enqueueOllama(1, () => _rawOllamaChat(messages, model, 60_000, "json"));
+    return await enqueueOllama(1, () => _rawOllamaChat(messages, model, 180_000, "json"));
   } catch (err) {
     console.warn("[Ollama] JSON chat failed:", err);
     return "";
@@ -254,6 +254,71 @@ export async function getEmbedding(text: string, model: string = EMBED_MODEL): P
   } catch (err) {
     console.warn("[Ollama] Embedding failed:", err);
     return [];
+  }
+}
+
+/**
+ * Batch embedding — embed multiple texts in a single Ollama request.
+ * Ollama's /api/embed endpoint accepts an array of inputs and returns a
+ * corresponding array of embedding vectors. Batching slashes overhead:
+ *
+ *   Single: 16 chunks × 1 HTTP round-trip × model-load-per-call = ~16 requests
+ *   Batched: 1 HTTP request with 16 inputs = ~1 request, 10× faster
+ *
+ * Returns a Map<index, number[]>. Indices that failed get an empty array.
+ * The batch is enqueued at priority 2 (background) so user chat isn't starved.
+ */
+export async function getEmbeddingBatch(
+  texts: string[],
+  model: string = EMBED_MODEL
+): Promise<number[][]> {
+  const ollamaUp = await isOllamaAvailable();
+  if (!ollamaUp) return texts.map(() => []);
+
+  // Pre-filter: skip empty/whitespace-only inputs, truncate overlong ones.
+  const prepared = texts.map((t) => {
+    const trimmed = t.trim();
+    if (trimmed.length === 0) return "";
+    return trimmed.length > EMBED_MAX_CHARS ? trimmed.slice(0, EMBED_MAX_CHARS) : trimmed;
+  });
+
+  // Find which indices actually have content
+  const validIndices: number[] = [];
+  const validInputs: string[] = [];
+  for (let i = 0; i < prepared.length; i++) {
+    if (prepared[i]) {
+      validIndices.push(i);
+      validInputs.push(prepared[i]);
+    }
+  }
+
+  if (validInputs.length === 0) return texts.map(() => []);
+
+  try {
+    const embeddings = await enqueueOllama(2, async () => {
+      const res = await fetch(`${OLLAMA_BASE}/api/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, input: validInputs }),
+        signal: AbortSignal.timeout(60_000), // longer timeout for batches
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`Batch embed error ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = (await res.json()) as { embeddings?: number[][] };
+      return data.embeddings ?? [];
+    });
+
+    // Map results back to original indices
+    const result: number[][] = texts.map(() => []);
+    for (let i = 0; i < validIndices.length; i++) {
+      result[validIndices[i]] = embeddings[i] ?? [];
+    }
+    return result;
+  } catch (err) {
+    console.warn("[Ollama] Batch embedding failed:", err);
+    return texts.map(() => []);
   }
 }
 
