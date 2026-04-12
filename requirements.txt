@@ -1,0 +1,30 @@
+# JARVIS AI - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Vector database (ChromaDB server)
+chromadb>=0.5.0
+
+# Text-to-speech (local, offline)
+pyttsx3>=2.90
+
+# Speech recognition (local Whisper or Google fallback)
+SpeechRecognition>=3.10.0
+
+# Audio I/O
+pyaudio>=0.2.14
+
+# Web scraping utilities
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+feedparser>=6.0.0
+lxml>=5.0.0
+httpx>=0.27.0
+aiohttp>=3.9.0
+fake-useragent>=1.4.0
+python-dotenv>=1.0.0
+
+# Proxy & anti-detection
+cloudscraper>=1.2.71
+
+# Utilities
+pydantic>=2.5.0

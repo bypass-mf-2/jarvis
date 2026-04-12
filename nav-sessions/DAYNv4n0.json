@@ -1,0 +1,25 @@
+{
+  "cookies": [
+    {
+      "name": "edgebucket",
+      "value": "p9whP5qqgOggififod",
+      "domain": ".reddit.com",
+      "path": "/",
+      "expires": 1810580124.762678,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://www.google.com",
+      "localStorage": [
+        {
+          "name": "rc::a",
+          "value": "MW9obTc5cTFhdmV0eGY="
+        }
+      ]
+    }
+  ]
+}

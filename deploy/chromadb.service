@@ -1,0 +1,17 @@
+[Unit]
+Description=ChromaDB Vector Store
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jarvis
+ExecStart=/root/jarvis/.venv/bin/chroma run --path /root/jarvis/chroma-data --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chromadb
+
+[Install]
+WantedBy=multi-user.target

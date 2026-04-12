@@ -1,0 +1,22 @@
+[Unit]
+Description=JARVIS AI Server
+After=network.target chromadb.service ollama.service
+Wants=chromadb.service ollama.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jarvis
+Environment=NODE_ENV=production
+Environment=PORT=22770
+Environment=HOME=/root
+EnvironmentFile=-/root/jarvis/.env
+ExecStart=/root/jarvis/node_modules/.bin/tsx start-jarvis.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis
+
+[Install]
+WantedBy=multi-user.target
