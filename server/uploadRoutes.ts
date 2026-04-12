@@ -9,6 +9,7 @@ import multer from "multer";
 import * as path from "path";
 import * as fs from "fs";
 import { ingestFileToKnowledge } from "./fileIngestion.js";
+import { ingestWritingSample, type WritingCategory } from "./writingProfile.js";
 import { logger } from "./logger.js";
 import { getUploadedFileChunkCounts, deleteChunksByFileUrl } from "./db.js";
 
@@ -240,6 +241,185 @@ router.delete("/upload/:filename", async (req, res) => {
     logger.error("upload", `Delete failed: ${err}`);
     res.status(500).json({ error: String(err) });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Writing Samples — separate upload endpoint for personal writing style
+// ═══════════════════════════════════════════════════════════════════════════
+// These uploads are SEPARATE from the regular knowledge-base upload flow:
+//   - stored in uploads-writing/ (not uploads/)
+//   - never embedded into ChromaDB
+//   - never retrieved by RAG
+//   - never show up in the regular upload-status list
+// Their only purpose is to feed the writingProfile module so Jarvis can
+// learn the user's voice.
+
+const writingUploadDir = path.join(process.cwd(), "uploads-writing");
+if (!fs.existsSync(writingUploadDir)) {
+  fs.mkdirSync(writingUploadDir, { recursive: true });
+}
+
+const writingStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, writingUploadDir),
+  filename: (_req, file, cb) => {
+    const uniqueName = `${Date.now()}-${file.originalname}`;
+    cb(null, uniqueName);
+  },
+});
+
+const writingUpload = multer({
+  storage: writingStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB — voice analysis doesn't need massive files
+  fileFilter: (_req, file, cb) => {
+    // Only accept text-bearing formats. No images, no audio, no video —
+    // those don't represent the user's writing.
+    const ok = [
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.oasis.opendocument.text",
+      "application/rtf", "text/rtf",
+      "text/plain", "text/markdown", "text/csv",
+    ];
+    if (ok.includes(file.mimetype) || /\.(txt|md|markdown|rst|rtf|pdf|doc|docx|odt)$/i.test(file.originalname)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Writing samples must be text/pdf/doc — got ${file.mimetype}`));
+    }
+  },
+});
+
+const VALID_CATEGORIES = new Set<WritingCategory>([
+  "essay", "lab_report", "book_report", "resume", "book", "article", "other",
+]);
+
+function normalizeCategory(raw: unknown): WritingCategory {
+  if (typeof raw !== "string") return "other";
+  const lower = raw.toLowerCase() as WritingCategory;
+  return VALID_CATEGORIES.has(lower) ? lower : "other";
+}
+
+function normalizeDescription(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 2000); // cap so a pasted essay in the field doesn't blow the prompt
+}
+
+// ── Upload a writing sample ──────────────────────────────────────────────
+router.post("/upload-writing", writingUpload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const category = normalizeCategory(req.body?.category);
+    const description = normalizeDescription(req.body?.description);
+    const filepath = req.file.path;
+    const originalName = req.file.originalname;
+
+    logger.info("writingProfile", `Writing sample uploaded: ${originalName} (${category})`);
+
+    // Do the text-extraction + DB-insert phase synchronously so the client
+    // gets a real success/failure response. If text extraction fails (e.g.
+    // unreadable PDF), we send a 422 so the UI can show the actual error
+    // instead of silently showing "analyzing..." forever.
+    // Style analysis (the slow Ollama call) still runs in the background
+    // after the response is sent, because it takes 10-30s.
+    try {
+      const result = await ingestWritingSample(filepath, originalName, category, description);
+      logger.info(
+        "writingProfile",
+        `Sample #${result.sampleId} ingested: ${result.wordCount} words, analyzed=${result.analyzed}`
+      );
+      res.json({
+        success: true,
+        filename: originalName,
+        category,
+        size: req.file.size,
+        sampleId: result.sampleId,
+        wordCount: result.wordCount,
+        analyzed: result.analyzed,
+        message: result.analyzed
+          ? "Writing sample ingested and analyzed"
+          : "Writing sample ingested — style analysis will run in background",
+      });
+    } catch (err: any) {
+      // Ingest failed before the DB row was created — delete the orphan
+      // file from disk so re-upload is clean, and send the actual error.
+      try { fs.unlinkSync(filepath); } catch { /* noop */ }
+      logger.error("writingProfile", `Sample ingest failed for ${originalName}: ${err?.message ?? err}`);
+      res.status(422).json({
+        error: err?.message ?? String(err),
+        filename: originalName,
+      });
+    }
+  } catch (err) {
+    logger.error("writingProfile", `Writing upload failed: ${err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ── Upload multiple writing samples at once ──────────────────────────────
+router.post("/upload-writing-multiple", writingUpload.array("files", 20), async (req, res) => {
+  try {
+    if (!req.files || !Array.isArray(req.files)) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
+    const category = normalizeCategory(req.body?.category);
+    const description = normalizeDescription(req.body?.description);
+
+    for (const file of req.files) {
+      ingestWritingSample(file.path, file.originalname, category, description).catch((err) => {
+        logger.error("writingProfile", `Sample ingest failed for ${file.originalname}: ${err}`);
+      });
+    }
+
+    res.json({
+      success: true,
+      filesReceived: req.files.length,
+      category,
+      message: "Writing samples received — style analysis in progress",
+    });
+  } catch (err) {
+    logger.error("writingProfile", `Writing batch upload failed: ${err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ── Navigator screenshot serving ─────────────────────────────────────────
+// Serves screenshots captured by server/navigator.ts so the UI can display
+// the step-by-step audit trail. Path-traversal guarded.
+const navScreenshotDir = path.join(process.cwd(), "nav-screenshots");
+router.get("/nav-screenshot/:filename", (req, res) => {
+  const filename = req.params.filename;
+  if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+    return res.status(400).json({ error: "Invalid filename" });
+  }
+  const filepath = path.join(navScreenshotDir, filename);
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: "Screenshot not found" });
+  }
+  res.sendFile(filepath);
+});
+
+// ── Navigator download serving ───────────────────────────────────────────
+// Serves files the agent downloaded during a task run. Namespaced by taskId
+// so downloads from different runs can't collide. Path-traversal guarded.
+const navDownloadDir = path.join(process.cwd(), "nav-downloads");
+router.get("/nav-download/:taskId/:filename", (req, res) => {
+  const { taskId, filename } = req.params;
+  // Strict: taskId is nanoid(10) → alphanumeric + _ -. Filename is arbitrary
+  // but must not contain path separators or traversal segments.
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) {
+    return res.status(400).json({ error: "Invalid taskId" });
+  }
+  if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+    return res.status(400).json({ error: "Invalid filename" });
+  }
+  const filepath = path.join(navDownloadDir, taskId, filename);
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: "Download not found" });
+  }
+  res.download(filepath, filename);
 });
 
 export default router;

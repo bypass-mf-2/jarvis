@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { Link } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,7 +18,7 @@ import {
   MessageSquare, Database, Rss, Settings, Activity,
   RefreshCw, CheckCircle, XCircle, Clock, AlertTriangle,
   Bot, User, Loader2, StopCircle,
-  Upload, BarChart3
+  Upload, BarChart3, PenLine, Compass
 } from "lucide-react";
 import { FileUploadPanel } from "@/components/FileUploadPanel";
 import { MessageRating, TrainingDashboard } from "@/components/TrainingComponents";
@@ -118,9 +119,16 @@ export default function Home() {
   );
   // Activity rates — only fetched while the Benchmarks panel is open since
   // it's the only consumer. Same 10s refresh cadence as the rest of the panel.
-  const { data: rates, refetch: refetchRates } = trpc.systemStatus.rates.useQuery(
+  // Tracks isLoading + isError so the UI can distinguish "loading", "endpoint
+  // missing/server stale", and "actual zero" instead of silently showing 0.
+  const {
+    data: rates,
+    refetch: refetchRates,
+    isLoading: ratesLoading,
+    isError: ratesError,
+  } = trpc.systemStatus.rates.useQuery(
     undefined,
-    { enabled: sidePanel === "benchmarks", refetchInterval: 10000 }
+    { enabled: sidePanel === "benchmarks", refetchInterval: 10000, retry: 1 }
   );
   const { data: knowledgeData, refetch: refetchKnowledge } = trpc.knowledge.list.useQuery(
     { limit: 30, offset: 0 },
@@ -591,6 +599,38 @@ export default function Home() {
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Upload Files</TooltipContent>
+            </Tooltip>
+
+            {/* Writing Profile — dedicated page for personal writing samples */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link href="/writing-profile">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-primary"
+                  >
+                    <PenLine className="w-4 h-4" />
+                  </Button>
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>Writing Profile (voice learning)</TooltipContent>
+            </Tooltip>
+
+            {/* Navigator — browser automation agent */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link href="/navigator">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-primary"
+                  >
+                    <Compass className="w-4 h-4" />
+                  </Button>
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>Navigator (browser agent)</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -1235,7 +1275,10 @@ export default function Home() {
 
                   <Separator className="my-4" />
 
-                  {/* Activity rates — server-side rolling window counts */}
+                  {/* Activity rates — server-side rolling window counts.
+                      Distinguishes loading / error / data states so a literal
+                      0 is never confused with "the endpoint is missing because
+                      the server hasn't reloaded yet". */}
                   <div className="mb-5">
                     <div className="flex items-center gap-2 mb-3">
                       <Activity className="w-3.5 h-3.5 text-primary" />
@@ -1243,37 +1286,48 @@ export default function Home() {
                         Activity
                       </span>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      {[
-                        {
-                          label: "Chunks 1h",
-                          value: rates?.chunksLast1h ?? 0,
-                          // chunks/min derived from the hourly count — feels live without
-                          // requiring a finer sampling cadence
-                          sub: rates ? `${(rates.chunksLast1h / 60).toFixed(1)}/min` : null,
-                        },
-                        {
-                          label: "Chunks 24h",
-                          value: rates?.chunksLast24h ?? 0,
-                          sub: null,
-                        },
-                        {
-                          label: "New sources 24h",
-                          value: rates?.sourcesAddedLast24h ?? 0,
-                          sub: null,
-                        },
-                      ].map((m) => (
-                        <div
-                          key={m.label}
-                          className="rounded-lg p-2 text-center"
-                          style={{ background: "oklch(0.12 0.018 240)", border: "1px solid oklch(0.22 0.03 230)" }}
-                        >
-                          <p className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">{m.label}</p>
-                          <p className="text-sm font-mono text-foreground">{m.value.toLocaleString()}</p>
-                          {m.sub && <p className="text-[9px] text-muted-foreground mt-0.5">{m.sub}</p>}
-                        </div>
-                      ))}
-                    </div>
+                    {ratesError ? (
+                      <div className="rounded-lg p-3 text-center text-xs text-amber-400 bg-amber-400/10 border border-amber-400/20">
+                        Activity endpoint unreachable — restart the dev server to pick up the new tRPC route.
+                      </div>
+                    ) : ratesLoading || !rates ? (
+                      <div className="rounded-lg p-3 text-center text-xs text-muted-foreground"
+                        style={{ background: "oklch(0.12 0.018 240)", border: "1px solid oklch(0.22 0.03 230)" }}>
+                        Loading activity…
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          {
+                            label: "Chunks 1h",
+                            value: rates.chunksLast1h,
+                            // chunks/min derived from the hourly count — feels live without
+                            // requiring a finer sampling cadence
+                            sub: `${(rates.chunksLast1h / 60).toFixed(1)}/min`,
+                          },
+                          {
+                            label: "Chunks 24h",
+                            value: rates.chunksLast24h,
+                            sub: null,
+                          },
+                          {
+                            label: "New sources 24h",
+                            value: rates.sourcesAddedLast24h,
+                            sub: null,
+                          },
+                        ].map((m) => (
+                          <div
+                            key={m.label}
+                            className="rounded-lg p-2 text-center"
+                            style={{ background: "oklch(0.12 0.018 240)", border: "1px solid oklch(0.22 0.03 230)" }}
+                          >
+                            <p className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">{m.label}</p>
+                            <p className="text-sm font-mono text-foreground">{m.value.toLocaleString()}</p>
+                            {m.sub && <p className="text-[9px] text-muted-foreground mt-0.5">{m.sub}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <Separator className="my-4" />

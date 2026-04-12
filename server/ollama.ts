@@ -85,14 +85,50 @@ async function _rawOllamaChat(
   return data.message?.content ?? "";
 }
 
+// Track which embed errors we've already logged so we don't flood the log
+// with thousands of identical messages when every chunk in a scrape cycle
+// fails for the same reason (e.g. model not pulled, input too long).
+const _loggedEmbedErrors = new Set<string>();
+
+// Ollama's embed endpoint has an undocumented input length cap. Chunks
+// bigger than this routinely 400. nomic-embed-text itself is trained at
+// 2048 tokens (~8000 chars); give a bit of headroom.
+const EMBED_MAX_CHARS = 7500;
+
 async function _rawOllamaEmbed(text: string, model: string): Promise<number[]> {
+  // Ollama rejects empty/whitespace-only input with 400. Short-circuit so
+  // the scrape pipeline doesn't spam the queue with doomed requests.
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+
+  // Truncate overlong inputs before sending. A 400 on a 30 KB chunk is
+  // easy to trigger from the scraper; truncating is lossy but better
+  // than returning empty and losing the chunk entirely.
+  const input = trimmed.length > EMBED_MAX_CHARS
+    ? trimmed.slice(0, EMBED_MAX_CHARS)
+    : trimmed;
+
   const res = await fetch(`${OLLAMA_BASE}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: text }),
+    body: JSON.stringify({ model, input }),
     signal: AbortSignal.timeout(30_000),
   });
-  if (!res.ok) throw new Error(`Embed error: ${res.status}`);
+  if (!res.ok) {
+    // Capture Ollama's actual error message so we can see WHY it's 400ing
+    // instead of seeing an opaque "Embed error: 400" in the log forever.
+    let body = "";
+    try { body = await res.text(); } catch {}
+    const key = `${res.status}:${body.slice(0, 200)}`;
+    if (!_loggedEmbedErrors.has(key)) {
+      _loggedEmbedErrors.add(key);
+      console.error(
+        `[Ollama] Embed error ${res.status} from ${OLLAMA_BASE}/api/embed ` +
+        `(model=${model}, inputLen=${input.length}): ${body.slice(0, 300)}`
+      );
+    }
+    throw new Error(`Embed error: ${res.status}`);
+  }
   const data = (await res.json()) as { embeddings?: number[][] };
   return data.embeddings?.[0] ?? [];
 }

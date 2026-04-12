@@ -1,0 +1,177 @@
+{"instruction":"What are some key features of the Nano Banana 2 image generation model?","output":"advanced world knowledge, production ready specs, subject consistency"}
+{"instruction":"Can I use the Gemini app to create music with just an image?","output":"Yes, the Gemini app now features music generation capabilities that can be triggered by text or images."}
+{"instruction":"How do I get access to Project Genie?","output":"You need to be a Google AI Ultra subscriber in the U.S."}
+{"instruction":"Who is the author of the passage?","output":"Saul McLeod, PhD"}
+{"instruction":"What is Olivia Guy-Evans' professional background?","output":"BSc (Hons) Psychology, MSc Psychology of Education"}
+{"instruction":"What role do you think childhood experiences play in shaping an individual's behavior according to Freud's theory?","output":"According to Freud, childhood experiences are considered a significant factor in shaping human behavior, with repressed desires and unconscious thoughts arising from these experiences."}
+{"instruction":"How do events in childhood influence adult personality?","output":"Events in our childhood have a great influence on our adult lives, shaping our personality."}
+{"instruction":"How does Sigmund Freud believe humans deceive themselves?","output":"According to Freud, humans are even more adept at self-deception than they are at deceiving others."}
+{"instruction":"What is a defense mechanism according to Freud's theory?","output":"Defense mechanisms in psychology explained are actions taken by an individual to avoid or cope with stressors, conflicts, or anxiety. According to Freud's psychoanalytic approach, these mechanisms include repression, denial, projection, reaction formation, and others."}
+{"instruction":"What were Freud's early career goals?","output":"Initially wanted to become a law professional"}
+{"instruction":"What event in 1885 led to Freud's interest in the unconscious mind?","output":"Freud received a grant to study with Jean-Martin Charcot."}
+{"instruction":"What was one of Freud's first steps after returning to Vienna in 1886?","output":"He married Martha Bernays and established a private practice to treat nervous disorders."}
+{"instruction":"What were some of the notable works published by Sigmund Freud?","output":"The Interpretation of Dreams, The Psychopathology of Everyday Life, and Three Essays on the Theory of Sexuality."}
+{"instruction":"Where did Sigmund Freud emigrate to in 1938 due to the Nazi threat?","output":"London"}
+{"instruction":"What is the current situation with opposition leader Péter Magyar in the Hungarian elections?","output":"His opposition movement is leading in the polls."}
+{"instruction":"What are some examples of travel being affected in Ireland?","output":"Vehicles, including tractors"}
+{"instruction":"What are the potential consequences on the EU airline industry if the Strait of Hormuz remains closed?","output":"Fuel shortages"}
+{"instruction":"What motivated Pakistan's decision to host US-Iran peace talks?","output":"critical minerals"}
+{"instruction":"How does AI in education help personalize learning for students?","output":"AI in education enables educators to personalize learning for each student by using algorithms that analyze data, identify patterns, and make predictions."}
+{"instruction":"What specific regulations does the Act impose on facilities that provide abortion services?","output":"reporting requirements"}
+{"instruction":"What was the year the Supreme Court decided the case Whole Woman's Health v. Hellerstedt?","output":"579 US 582, 136 S. Ct. 2292, 195 L. Ed., 1973"}
+{"instruction":"What is the outcome for a patient who has complications during a medical abortion after leaving an abortion facility?","output":"a benefit"}
+{"instruction":"What is the Arctic Wolf Security Teams' role in defending customers' systems?","output":"The Arctic Wolf Security Teams rapidly detect and defend customers' systems against cyber threats, providing rapid detection, root cause analysis, and recommendations for further system hardening."}
+{"instruction":"What type of support does Arctic Wolf Security offer?","output":"Managed security and incident response solutions, including security awareness training and additional resources for security leaders."}
+{"instruction":"What is the 2024 Gartner Market Guide for MDR Services?","output":"Get a comprehensive analyst overview of the evolving MDR landscape."}
+{"instruction":"Where can I get more information about Arctic Wolf Networks?","output":"https://www.arcticwolf.com/company/overview/"}
+{"instruction":"What resources does Arctic Wolf Networks offer?","output":"Arctic Wolf Networks offers a range of resources including blog, case studies, webinars, events, analyst reports, and newsletter."}
+{"instruction":"What are the passing marks for the Svelte Framework certification exam?","output":"25 out of 50"}
+{"instruction":"What does Svelte shift most of its work to?","output":"compile time"}
+{"instruction":"What are the benefits of using Svelte Framework?","output":"Svelte's compilation approach leads to highly optimized and performant applications, as it minimizes the amount of code shipped to the browser."}
+{"instruction":"What kind of professionals can benefit from taking the Svelte Framework Certification?","output":"UI/UX designers, web developers and full-stack developers"}
+{"instruction":"What kind of companies typically hire Svelte Framework Professionals?","output":"Companies that specialize in web software development"}
+{"instruction":"How can I apply for the Svelte Framework Professional Certification?","output":"You can apply by clicking 'Buy Now' and proceeding with online payments."}
+{"instruction":"What versions of PostgreSQL are currently supported?","output":"Current"}
+{"instruction":"What levels of transaction isolation does the SQL standard define?","output":"four levels"}
+{"instruction":"What happens to a query in a phantom read situation?","output":"A transaction re-executes a query returning a set of rows that satisfy a search condition and finds that the set of rows satisfying the condition has changed due to another recently-committed transaction."}
+{"instruction":"What happens when another transaction commits changes during the execution of a SELECT query?","output":"The SELECT query sees the effects of previous updates executed within its own transaction, but not yet committed; it effectively sees a snapshot of the database as of the moment the query begins to run."}
+{"instruction":"What happens if another transaction updates the target row before a concurrent update transaction commits?","output":"It will be rolled back, allowing the second updater to proceed with updating the row."}
+{"instruction":"What happens if a row matches the search condition after being updated by the first updater?","output":"the second updater proceeds with its operation, starting from the updated version of the row."}
+{"instruction":"What level of consistency does Read Committed mode provide?","output":"a partially consistent view"}
+{"instruction":"What happens to a SELECT query when running at the Serializable isolation level?","output":"It sees only data committed before the transaction began."}
+{"instruction":"What is an exception where Serializable mode is not recommended?","output":"When updating transactions contain logic sufficiently complex that they may give wrong answers in Read Committed mode."}
+{"instruction":"How does Chirpy achieve its coverage of diverse topics?","output":"Chirpy achieves its coverage by using a modular design that combines both neural generation and scripted dialogue."}
+{"instruction":"What are some examples of problems that deep learning has improved for robots?","output":"A range of problems such as grasping and locomotion."}
+{"instruction":"What type of training do home robots need to perform various interactive tasks in novel environments?","output":"Training on rich data sources that contain a wide range of different environments, tasks, and objects."}
+{"instruction":"How does k-medoids clustering compare to traditional algorithms in terms of handling outliers?","output":"k-medoids can be more robust to outliers if using metrics like L_1."}
+{"instruction":"Can I easily modify my existing KMeans clustering code to use the k-medoids algorithm from BanditPAM?","output":"Yes, as its interface matches the sklearn.cluster.KMeans interface, minimal changes are necessary."}
+{"instruction":"What dates will the NeurIPS 2021 conference be held?","output":"Dec 6th - 14th"}
+{"instruction":"What is the contact email of the authors of the paper 'Improving Compositionality of Neural Networks by Decoding Representations to Inputs'","output":"wumike@stanford.edu"}
+{"instruction":"What is the location of EMNLP 2021?","output":"Co-located with CoNLL 2021"}
+{"instruction":"How can I get in touch with the authors of one of the papers presented at Stanford AI Lab Papers at EMNLP/CoNLL 2021?","output":"You can reach out to the contact authors directly."}
+{"instruction":"What is the author's contact information for this paper?","output":"rewang@stanford.edu"}
+{"instruction":"What conference is taking place next week?","output":"The Conference on Robot Learning (CoRL 2021)"}
+{"instruction":"Who is the corresponding author of the paper LILA: Language-Informed Latent Actions?","output":"Siddharth Karamcheti"}
+{"instruction":"What is an advantage of selective classification?","output":"Errors can be handled by abstinence and human oversight."}
+{"instruction":"Can a simple selective classifier really improve accuracy?","output":"Yes, even simple selective classifiers can improve accuracy by abstaining."}
+{"instruction":"Can selective classification actually reduce accuracy for certain groups?","output":"Yes, according to our recent ICLR paper, selective classification can fail to improve and even hurt the accuracy over certain groups."}
+{"instruction":"What is the International Conference on Computer Vision (ICCV 2021) about?","output":"The conference will present work from Stanford AI Lab Papers at ICCV 2021."}
+{"instruction":"What is the contact email address of the authors of GLoRIA paper?","output":"mschuang@stanford.edu"}
+{"instruction":"What are some challenges in understanding the behavior of large language models?","output":"Understanding the behavior of complex machine learning systems, particularly Large Language Models (LLMs), is a critical challenge in modern artificial intelligence."}
+{"instruction":"How does feature attribution work in understanding AI decision-making?","output":"Feature attribution isolates the specific input features driving a prediction."}
+{"instruction":"Where are images stored permanently on the blog server?","output":"The static/blog directory"}
+{"instruction":"What is the role of noise in imaging systems?","output":"Noise corrupts the output of an optical system's mapping of objects to noiseless images."}
+{"instruction":"What does the information estimator use to estimate object distinction?","output":"noisy measurements and a noise model"}
+{"instruction":"What is the RL algorithm described in this post called?","output":"divide and conquer"}
+{"instruction":"What type of Reinforcement Learning (RL) does this algorithm use?","output":"Off-policy RL"}
+{"instruction":"What is a characteristic of on-policy RL algorithms?","output":"We have to throw away old data each time we update the policy."}
+{"instruction":"It learns the semantic relationships between words in a text.","output":"a complete theory of word embeddings."}
+{"instruction":"What is the theoretical framework used by word2vec for representation learning?","output":"Unweighted least-squares matrix factorization"}
+{"instruction":"How does word2vec use PCA to find its learned representations?","output":"The final learned representations are simply given by PCA."}
+{"instruction":"What are some recent advancements in Large Language Models (LLMs) that enable new applications?","output":"Recent advances in Large Language Models (LLMs) enable exciting LLM-integrated applications."}
+{"instruction":"Print Restaurant A","output":"Restaurant A"}
+{"instruction":"Should I trust Yelp reviews if they have been manipulated?","output":"No, because an LLM can be misled to recommend a restaurant based on injected instructions."}
+{"instruction":"Who is the author of the blog post Repurposing Protein Folding Models for Generation with Latent Diffusion","output":"Amy X. Lu"}
+{"instruction":"How does the passage control what content appears on the homepage?","output":"The `more` excerpt separator is used to enforce that only part of the text appears on the homepage, while the rest is accessed by clicking 'Continue'."}
+{"instruction":"What does PLAID stand for?","output":"<i>PLAID</i> is a multimodal generative model that simultaneously generates protein 1D sequence and 3D structure, by learning the latent space of protein folding models."}
+{"instruction":"What comes next after protein folding?","output":"generate"}
+{"instruction":"What is the focus of this research on reinforcement learning for traffic smoothing?","output":"autonomous vehicles"}
+{"instruction":"What was the goal of deploying 100 reinforcement learning-controlled cars into rush-hour highway traffic?","output":"To smooth congestion and reduce fuel consumption for everyone."}
+{"instruction":"What is the purpose of the `static/blog` directory?","output":"The `static/blog` directory permanently stores images and GIFs in BAIR Blog posts."}
+{"instruction":"Who are the authors of Virtual Personas for Language Models via an Anthology of Backstories","output":"Suhong Moon, Marwa Abdulhai, Minwoo Kang, Joseph Suh, Widyadewi Soedarmadji, Eran Kohen Behar, David."}
+{"instruction":"Who wrote the blog post on https://bair.berkeley.edu/blog/","output":"John Canny"}
+{"instruction":"What steps can I take to provide an image for my blog post?","output":"Please provide this image (and any other images and GIFs) in the blog to the BAIR Blog editors directly."}
+{"instruction":"What is the author of this passage?","output":"Eve Fleisig, Genevieve Smith, Madeline Bossi, Ishita Rustagi, Xavier Yin, Dan Klein"}
+{"instruction":"What does the author teach?","output":"teaching"}
+{"instruction":"What is the best way to get in touch with you?","output":"You can drop us a message at Sorry, you need Javascript on to email me."}
+{"instruction":"Can I rely on the information in this passage?","output":"No, the author makes no guarantees about the accuracy or completeness of the information."}
+{"instruction":"What is the purpose of education according to this passage?","output":"Education is the kindling of a flame, not the filling of a vessel."}
+{"instruction":"Who is the Acting Director of the National Institute of Standards and Technology?","output":"Dr. James M. Turner"}
+{"instruction":"What is the name of Turner, Acting Director of the National Institute of Standards and Technology?","output":"Turner"}
+{"instruction":"What were the standards listed for an abortion facility in the 1973 Supreme Court case?","output":"Standards for an abortion facility were listed."}
+{"instruction":"What is the primary benefit of abortions taking place in abortion facilities?","output":"a medical benefit when complications arise"}
+{"instruction":"What percentage of second-trimester abortions involve one of the two specific procedures mentioned in Stenberg v. Carhart?","output":"0.07 percent"}
+{"instruction":"How do I get certified in web development?","output":"Click on the 'Get Certified' button under your account information, then select 'Web Development' from the dropdown menu and follow the prompts to upgrade your skills."}
+{"instruction":"What is the difference between a Code Challenge and a Practice Problem?","output":"A Code Challenge is an assignment given to test your coding skills in solving a specific problem, whereas a Practice Problem is an exercise designed to help you learn and improve your coding skills."}
+{"instruction":"How do I get started with W3Schools?","output":"You can start by following their guided path."}
+{"instruction":"How do I get started with web development on W3Schools?","output":"Where To Start Web Templates"}
+{"instruction":"What is a quiz?","output":"A quiz is a series of questions, typically in the form of multiple-choice or true/false answers, that are used to test someone's knowledge or understanding of a particular subject."}
+{"instruction":"What is the difference between a Code Challenge and a Practice Problem?","output":"Code Challenges typically involve solving a specific programming task or problem, often with a time limit, while Practice Problems are designed to help learners practice and reinforce their understanding of concepts and skills."}
+{"instruction":"What is included in the Front End Certificate Course?","output":"Front End Certificate Course, Web Dev."}
+{"instruction":"What kind of courses does the web app offer?","output":"Certificate courses"}
+{"instruction":"What kind of support does W3Schools offer?","output":"W3Schools helps millions of people every day to learn and master new skills."}
+{"instruction":"What is W3Schools primarily used for?","output":"Learn programming and web development"}
+{"instruction":"Who wrote the passage about Sigmund Freud's theories and contribution to psychology?","output":"Saul McLeod, PhD"}
+{"instruction":"What was the primary shift that Sigmund Freud's psychoanalysis introduced to the field of psychology?","output":"psychology's focus toward the unconscious mind"}
+{"instruction":"How do Sigmund Freud's psychosexual stages affect personality development?","output":"Sigmund Freud believed that events in our childhood have a great influence on our adult lives, shaping our personality."}
+{"instruction":"Why do people tend to misrepresent their motivations when explaining themselves?","output":"people are great deceivers of others; they are even more adept at self-deception"}
+{"instruction":"What is a 'Freudian slip'?","output":"Repression"}
+{"instruction":"What was Sigmund Freud's primary interest in medicine?","output":"He was particularly interested in the condition of hysteria and its psychological causes."}
+{"instruction":"What influenced Sigmund Freud's interest in the unconscious mind?","output":"Jean-Martin Charcot's use of hypnosis to treat women suffering from hysteria"}
+{"instruction":"Who published the notable works The Interpretation of Dreams, The Psychopathology of Everyday Life, and Three Essays on the Theory of Sexuality?","output":"Sigmund Freud"}
+{"instruction":"What is psychoanalysis according to Sigmund Freud?","output":"a therapeutic technique for treating mental health disorders by exploring unconscious thoughts and feelings"}
+{"instruction":"What are the main components of the human personality according to Sigmund Freud?","output":"The id, ego, and superego."}
+{"instruction":"How does Freud believe dreams represent unfulfilled wishes from the id?","output":"Dreams represent unfulfilled wishes from the id, trying to break through to the conscious."}
+{"instruction":"What defense mechanisms did Freud propose that help the ego handle tension and conflicts?","output":"repression and projection"}
+{"instruction":"How do I search for articles with a specific author and date range on Google Scholar?","output":"Return articles authored by e.g., \"PJ Hayes\" or McCarthy Return articles published in e.g., J Biol Chem or Nature Return articles dated between — e.g., 1996"}
+{"instruction":"What information can I find on the case law page of Google Scholar?","output":"You can find federal and state court cases listed, as well as profiles, articles, and alerts."}
+{"instruction":"What specific reporting requirements are imposed on abortion facilities under the Act?","output":"Reporting requirements on facilities that provide abortion services exist in advance to admit patients promptly if unforeseen complications develop."}
+{"instruction":"What percentage of second-trimester abortions are performed in abortion facilities?","output":"0.07 percent"}
+{"instruction":"In the Supreme Court case of Bellotti v. Baird, what is the outcome when it comes to pregnant minors and access to abortion counseling?","output":"It seems unlikely that she will obtain adequate counsel and support from the attending physician at an abortion clinic, where abortions for pregnant minors frequently take place."}
+{"instruction":"Is it reasonable to assume that Congress would reimburse for medically necessary abortions?","output":"No, as the Court has held that it is irrational for Congress to authorize federal reimbursement for medically necessary services generally, but not specifically for certain medically necessary abortions."}
+{"instruction":"What was the result of Dobbs v. Jackson Women's Health Organization in terms of pre-viability abortions?","output":"The Court found that this interest could not justify any restriction on pre-viability abortions."}
+{"instruction":"Can artificial intelligence (AI) really revolutionize the way we learn?","output":"Yes, AI has the potential to revolutionize the way we learn."}
+{"instruction":"What is the main focus of the AI Now research center?","output":"the most recent scholarly literature in order to raise critical social questions that will shape our present and future"}
+{"instruction":"What does recent scholarship suggest about the relationship between artificial intelligence and autocratic regimes?","output":"Recent scholarship has suggested that artificial intelligence technology and autocratic regimes may be mutually reinforcing."}
+{"instruction":"What are the fundamental problems in AI research proposed by RC Schank?","output":"Ten fundamental problems in AI research were proposed, including goals of artificial intelligence."}
+{"instruction":"Can AI be used to create personalized learning experiences for students?","output":"Yes, AI can analyze data, identify patterns, and make predictions to enable educators to personalize learning for each student."}
+{"instruction":"What are some of the challenges associated with using AI in education?","output":"Privacy and security concerns, lack of trust, cost, and potential bias are some of the challenges that need to be addressed."}
+{"instruction":"How does the coordinator for a consumer group get chosen?","output":"The leader of the partition that corresponds to the group's ID is selected as the coordinator."}
+{"instruction":"What happens to a consumer's message progress if it crashes or is restarted while processing messages with auto-commit enabled?","output":"The consumer will begin consuming from the last committed offset, and any messages that have arrived since the last commit are read again."}
+{"instruction":"How do I control offsets when using the commit API?","output":"You can control offsets by making a call to the commit API directly, which sends an offset commit request to the broker."}
+{"instruction":"Why wouldn't you always use asynchronous commits for better performance?","output":"Because the consumer does not retry the request if the commit fails."}
+{"instruction":"How do asynchronous commits handle duplicate consumption?","output":"Instead of complicating the consumer internals to try and handle this problem in a sane way, the API gives you a callback which is invoked when the commit either succeeds or fails."}
+{"instruction":"How can I prevent duplicate reads when committing to an offset?","output":"If your commits succeed, you won't see duplicates since they won't result in duplicate reads."}
+{"instruction":"What are the implications of using asynchronous commits?","output":"Asynchronous commits only make sense for 'at least once' message delivery."}
+{"instruction":"How does at-least-once delivery work in Kafka?","output":"Kafka guarantees at-least-once delivery by default, meaning that every message sent to a topic will be received at least once."}
+{"instruction":"What is the purpose of setting client.id for a consumer?","output":"to easily correlate requests on the broker with the client instance which made it"}
+{"instruction":"What happens when a consumer instance crashes with a longer session timeout?","output":"It will take longer for another consumer in the group to take over its partitions."}
+{"instruction":"What happens to the consumer's position when auto-commit is enabled?","output":"The consumer automatically commits offsets periodically at the interval set by auto.commit.interval.ms."}
+{"instruction":"What is required for consumers in the same consumer group to have the same partition strategy?","output":"All consumers in the same consumer group must have the same partition strategy."}
+{"instruction":"What is the default strategy for assigning partitions to Kafka consumers?","output":"Range Assignment (Default)"}
+{"instruction":"How does the RoundRobinAssignor ensure an even distribution of partitions?","output":"The RoundRobinAssignor distributes partitions across all consumers one by one in a round-robin fashion."}
+{"instruction":"What is the advantage of using Sticky Assignor in Kafka?","output":"It minimizes the number of partition reassignments across rebalances, reducing the potential for missed messages or duplicated processing."}
+{"instruction":"How does Cooperative Sticky Assignor handle rebalance processes?","output":"It enables more incremental rebalancing, which can reduce latency and resources required during the rebalance process."}
+{"instruction":"What is the recommended approach for upgrading an existing consumer group from an eager rebalance assignor?","output":"A two-step rolling bounce to minimize disruption during the transition."}
+{"instruction":"What is the default partition assignment strategy for a Kafka consumer?","output":"The coordinator will continue to select the first commonly supported assignor (the existing one), so there is no behavior change yet. The example partition assignment strategy used here is org.apache.kafka.clients.consumer.StickyAssignor,org.apache.kafka.clients.consumer.CooperativeStickyAssignor."}
+{"instruction":"How do I configure the partition assignment strategy for my Kafka consumer?","output":"Configure the partition assignment strategy using props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, CooperativeStickyAssignor.class) in your Java configuration or use the equivalent assignor API in other client libraries."}
+{"instruction":"What is required for a group of members to select an assignor?","output":"All members in the group must advertise a compatible, ordered list of assignors."}
+{"instruction":"What happens to Kafka consumer rebalancing if auto.commit=false?","output":"RebalanceInProgressException, handle by calling poll() in the next loop iteration"}
+{"instruction":"How do I view and manage my Kafka consumer group?","output":"You can use the kafka-consumer-groups command-line utility to view and manage consumer groups, which is also provided with Confluent Platform."}
+{"instruction":"How do I reset a consumer's offset if it is stalled?","output":"You can use this tool to reset the consumer offset in scenarios where a consumer is stalled or significantly lagging. Make sure you deactivate the consumer before you reset its offset."}
+{"instruction":"How do I reset the offsets for the group test-1234 and topic test-metrics back by 20 positions?","output":"To reset the offsets back by 20 positions, use the following command: bin/kafka-consumer-groups.sh --bootstrap-server host:9092 --group test-1234 --reset-offsets --shift-by -20 --topic test-metrics -execute --group test-1234 The output will contain the group, topic and partitions, and the new offset for each: GROUP TOPIC PARTITION NEW-OFFSET test-1234 test-metrics 5 258400 test-1234 test-metrics 10 256082 test-1234 test-metrics 4 259560 test-1234 test-metrics 7 254984"}
+{"instruction":"What resources are available to build a Kafka consumer?","output":"You can find tutorials and example code in the 'How to build your first Apache KafkaConsumer application' tutorial, or use the language selector in Get Started to choose from several different languages."}
+{"instruction":"How do I build my first Apache Kafka Consumer application?","output":"Related content For a step-by-step tutorial with thorough explanations that break down a sample Kafka Consumer application, check out How to build your first Apache KafkaConsumer application ."}
+{"instruction":"What are some of the security certifications held by Event Hubs?","output":"Event Hubs is certified by CSA STAR, ISO, SOC, GxP, HIPAA, HITRUST, and PCI."}
+{"instruction":"What is Amazon Kinesis?","output":"Amazon Kinesis is a fully managed service for collecting, processing, and analyzing real-time streaming data."}
+{"instruction":"What benefits do LLMs offer in analyzing large text collections?","output":"LLMs offer more reliable and interpretable analyses of large text collections without supervision."}
+{"instruction":"How does SepSeq improve the performance of existing Large Language Models?","output":"SepSeq yields an average relative accuracy improvement of 35.6% across diverse domains"}
+{"instruction":"What effect does sensitivity-identification have on the overall performance of GQA Transformers?","output":"Applying both interventions to the sensitivity-identified layers outperforms all alternative configurations by 4-16 percentage points across six diverse benchmarks."}
+{"instruction":"Can you help me identify HIV-related stigma in a clinical note?","output":"We can assist with identifying HIV-related stigma in clinical notes using our LLM-based tool."}
+{"instruction":"What is a common challenge when using zero-shot generative inference on HIV stigma detection?","output":"Personalized Stigma remained the most challenging."}
+{"instruction":"How does SepSeq address the performance degradation of transformer-based LLMs when processing long numerical sequences?","output":"SepSeq addresses this issue by strategically inserting separator tokens, which act as an attention sink and recalibrate attention to focus on local segments while preserving global context."}
+{"instruction":"What are the limitations of low-rank adaptation methods?","output":"These approaches often limit model expressiveness and yield lower performance than full-parameter fine-tuning."}
+{"instruction":"What is Ably?","output":"Ably is a realtime PaaS that includes APIs and SDKs for building and shipping realtime features."}
+{"instruction":"What is Ably's impact on Hubspot's product?","output":"Ably is a business-critical part of our organization-wide infrastructure and a key innovation partner that our engineers really like working with."}
+{"instruction":"What is Event-driven architecture?","output":"Event-driven architecture (EDA) is a complex solution to a complex problem."}
+{"instruction":"What is Pub/Sub?","output":"Pub/Sub (or Publish/Subscribe) is an architectural design pattern used in distributed systems for asynchronous communication between different components or services."}
+{"instruction":"How does the Pub/Sub pattern work?","output":"Pub/Sub provides a framework for exchanging messages between publishers (components that create and send messages) and subscribers (components that receive and consume messages)."}
+{"instruction":"What are channels in a Pub/Sub system?","output":"Channels (or topics) - entities where messages are grouped."}
+{"instruction":"What are the benefits of the Pub/Sub model?","output":"Loose coupling between components, making your system more modular and flexible."}
+{"instruction":"Is Pub/Sub suitable for real-time applications?","output":"Yes, due to its asynchronous and event-driven nature."}
+{"instruction":"What factors should I consider when choosing a managed Pub/Sub service?","output":"Scalability, reliability, performance (including latency), guarantees, ease of development, cost of ownership, and its ability to deliver functionality beyond Pub/Sub."}
+{"instruction":"What is Ably's approach to maintaining and scaling infrastructure for real-time applications?","output":"Ably does not worry about maintaining and scaling messy infrastructure, instead providing APIs and SDKs to help developers ship realtime experiences."}
+{"instruction":"What event sources and event sinks does Kafka's out-of-the-box Connect interface support?","output":"Kafka's out-of-the-box Connect interface integrates with hundreds of event sources and event sinks including Postgres, JMS, Elasticsearch, AWS S3, and more."}
+{"instruction":"When did humans first reach Australia?","output":"around 60,000 years ago"}
+{"instruction":"What does this 'drain' do?","output":"It is involved in removing waste from the brain and may play a role in brain aging, injury, and diseases like Alzheimer's."}
+{"instruction":"What is the location where the Artemis II crew will land?","output":"The Artemis II crew will land in the Pacific Ocean."}

@@ -1,3 +1,8 @@
+// Add [HH:MM:SS.mmm] timestamps to every console line. Must come first so
+// it wins over any other module's top-level logs. Idempotent if already
+// applied by start-jarvis.ts.
+import "../consoleTimestamp.js";
+
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";

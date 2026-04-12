@@ -9,6 +9,7 @@
 import { parentPort, workerData } from "worker_threads";
 import { aggressiveSearch, aggressiveBatchSearch } from "./aggressiveScraper.js";
 import { fetchPageContentAndLinks } from "./webSearch.js";
+import { chunkText } from "./chunking.js";
 
 if (!parentPort) {
   throw new Error("crawlWorker must be run as a worker thread");
@@ -57,22 +58,8 @@ function isUrlAllowed(url: string): boolean {
   return true;
 }
 
-// ── Text chunking ──────────────────────────────────────────────────────────────
-function chunkText(text: string, maxChars = 800): string[] {
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  const chunks: string[] = [];
-  let current = "";
-  for (const sentence of sentences) {
-    if ((current + " " + sentence).length > maxChars && current) {
-      chunks.push(current.trim());
-      current = sentence;
-    } else {
-      current += (current ? " " : "") + sentence;
-    }
-  }
-  if (current.trim()) chunks.push(current.trim());
-  return chunks.filter((c) => c.length > 80);
-}
+// chunkText imported from ./chunking — shared across scraper, crawlWorker,
+// and fileIngestion. Sentence-based with overlap and a minimum length filter.
 
 // ── Link extraction ────────────────────────────────────────────────────────────
 function extractLinksFromHTML(html: string): string[] {

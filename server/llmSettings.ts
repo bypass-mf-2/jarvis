@@ -13,12 +13,18 @@
  * All settings persist in database and survive restarts
  */
 
-import { getDatabase, saveDatabase } from "./sqlite-init.js";
+import { getDatabase, markDbDirty } from "./sqlite-init.js";
 import { logger } from "./logger.js";
 
 const USE_MYSQL = !!process.env.DATABASE_URL;
 
+function isReadOnlySql(sql: string): boolean {
+  const trimmed = sql.trimStart().toUpperCase();
+  return trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN");
+}
+
 // ── SQLite helpers ──────────────────────────────────────────────────────────
+// Dirty-flag model — see db.ts for rationale.
 function sqliteRun(sql: string, params: any[] = []): any[] {
   const db = getDatabase();
   const stmt = db.prepare(sql);
@@ -26,7 +32,7 @@ function sqliteRun(sql: string, params: any[] = []): any[] {
   const results: any[] = [];
   while (stmt.step()) results.push(stmt.getAsObject());
   stmt.free();
-  saveDatabase();
+  if (!isReadOnlySql(sql)) markDbDirty();
   return results;
 }
 
@@ -36,7 +42,7 @@ function sqliteInsert(sql: string, params: any[] = []): number {
   stmt.bind(params);
   stmt.step();
   stmt.free();
-  saveDatabase();
+  markDbDirty();
   return (db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number) ?? 1;
 }
 

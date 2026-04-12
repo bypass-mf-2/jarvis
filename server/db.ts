@@ -5,7 +5,15 @@
  *   - If not  → use sql.js SQLite (local Windows)
  */
 
-import { getDatabase, saveDatabase } from "./sqlite-init";
+import { getDatabase, markDbDirty } from "./sqlite-init";
+
+// Cheap check: is this a read-only query? We skip marking the DB dirty
+// for SELECTs so a read-heavy workload doesn't trigger unnecessary saves
+// on the next autosave tick.
+function isReadOnlySql(sql: string): boolean {
+  const trimmed = sql.trimStart().toUpperCase();
+  return trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN");
+}
 
 // ── Detect mode ──────────────────────────────────────────────────────────────
 const USE_MYSQL = !!process.env.DATABASE_URL;
@@ -26,6 +34,12 @@ async function getMysqlDb() {
 }
 
 // ── SQLite helpers ───────────────────────────────────────────────────────────
+// Note: saveDatabase() used to be called after every single sqliteRun and
+// sqliteInsert. That meant every INSERT / UPDATE / DELETE triggered a full
+// 15 MB disk rewrite. During an active scrape cycle this was happening
+// hundreds of times per second and caused Windows EPERM on the atomic
+// rename under contention. Now we just mark the DB dirty and let the
+// 30-second autosave timer (or shutdown flush) handle persistence.
 function sqliteRun(sql: string, params: any[] = []): any[] {
   const db = getDatabase();
   const stmt = db.prepare(sql);
@@ -33,7 +47,7 @@ function sqliteRun(sql: string, params: any[] = []): any[] {
   const results: any[] = [];
   while (stmt.step()) results.push(stmt.getAsObject());
   stmt.free();
-  saveDatabase();
+  if (!isReadOnlySql(sql)) markDbDirty();
   return results;
 }
 
@@ -43,7 +57,7 @@ function sqliteInsert(sql: string, params: any[] = []): number {
   stmt.bind(params);
   stmt.step();
   stmt.free();
-  saveDatabase();
+  markDbDirty();
   return (db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number) ?? 1;
 }
 
@@ -617,6 +631,27 @@ export async function getTopDomains(limit: number = 20): Promise<any[]> {
   return sqliteRun("SELECT * FROM domain_scores WHERE chunks_stored > 0 ORDER BY quality_score DESC LIMIT ?", [limit]);
 }
 
+// Improvement ④: periodically recompute domain quality_score from actual
+// retrieval data. Without this, quality_score sits at the default 0.5
+// forever and getTopDomains returns an arbitrary order even though the
+// retrieval-count data is being collected by rag.ts. Called at the start
+// of each source-discovery cycle.
+//
+// Formula: 0.1 + 0.9 * (chunks_retrieved / chunks_stored), clamped to [0,1].
+//   - Retrieval ratio of 0 → score 0.1 (still discoverable, just deprioritized)
+//   - Retrieval ratio of 1 → score 1.0 (every chunk we stored gets used)
+// This gives the crawler a strong feedback signal without permanently
+// exiling zero-retrieval domains (new domains start at 0 retrieval).
+export async function recomputeDomainQualityScores(): Promise<number> {
+  sqliteRun(
+    `UPDATE domain_scores
+     SET quality_score = MIN(1.0, 0.1 + 0.9 * (CAST(chunks_retrieved AS REAL) / MAX(chunks_stored, 1)))
+     WHERE chunks_stored > 0`
+  );
+  const rows = sqliteRun("SELECT COUNT(*) as c FROM domain_scores WHERE chunks_stored > 0");
+  return (rows[0]?.c as number) ?? 0;
+}
+
 export async function getDomainScore(domain: string): Promise<number> {
   const rows = sqliteRun("SELECT quality_score FROM domain_scores WHERE domain = ? LIMIT 1", [domain]);
   return rows.length > 0 ? (rows[0].quality_score ?? 0.5) : 0.5;
@@ -841,5 +876,200 @@ export async function getMessagesBeforeId(conversationId: number, beforeId: numb
     "SELECT * FROM messages WHERE conversationId = ? AND id < ? ORDER BY id DESC LIMIT ?",
     [conversationId, beforeId, limit]
   );
+}
+
+// ── Writing Samples + Writing Profile ───────────────────────────────────────
+// These live in their own tables (writing_samples, writing_profile) and are
+// NEVER embedded into the vector store, NEVER returned from getKnowledgeChunks,
+// and NEVER retrieved by RAG. They exist solely so Jarvis can learn the
+// user's voice and mirror it in chat responses. See server/writingProfile.ts
+// for the module that consumes these helpers.
+
+export interface WritingSample {
+  id: number;
+  userId: number;
+  originalName: string;
+  storedPath: string;
+  category: string;
+  description: string | null;
+  rawText: string;
+  wordCount: number;
+  styleFeatures: string | null;
+  analyzedAt: number | null;
+  createdAt: number;
+}
+
+export async function addWritingSample(data: {
+  originalName: string;
+  storedPath: string;
+  category: string;
+  description?: string | null;
+  rawText: string;
+  wordCount: number;
+  styleFeatures?: string | null;
+  userId?: number;
+}): Promise<number> {
+  return sqliteInsert(
+    `INSERT INTO writing_samples
+       (userId, originalName, storedPath, category, description, rawText, wordCount, styleFeatures, analyzedAt, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      data.userId ?? 1,
+      data.originalName,
+      data.storedPath,
+      data.category,
+      data.description ?? null,
+      data.rawText,
+      data.wordCount,
+      data.styleFeatures ?? null,
+      data.styleFeatures ? Date.now() : null,
+      Date.now(),
+    ]
+  );
+}
+
+export async function listWritingSamples(userId: number = 1): Promise<WritingSample[]> {
+  return sqliteRun(
+    "SELECT * FROM writing_samples WHERE userId = ? ORDER BY createdAt DESC",
+    [userId]
+  ) as any[];
+}
+
+export async function getWritingSampleById(id: number): Promise<WritingSample | null> {
+  const rows = sqliteRun("SELECT * FROM writing_samples WHERE id = ? LIMIT 1", [id]) as any[];
+  return rows.length > 0 ? (rows[0] as WritingSample) : null;
+}
+
+export async function updateWritingSampleFeatures(id: number, features: string): Promise<void> {
+  sqliteRun(
+    "UPDATE writing_samples SET styleFeatures = ?, analyzedAt = ? WHERE id = ?",
+    [features, Date.now(), id]
+  );
+}
+
+export async function deleteWritingSample(id: number): Promise<void> {
+  sqliteRun("DELETE FROM writing_samples WHERE id = ?", [id]);
+}
+
+export async function getWritingProfile(userId: number = 1): Promise<{
+  profileJson: string;
+  sampleCount: number;
+  totalWords: number;
+  regeneratedAt: number;
+} | null> {
+  const rows = sqliteRun(
+    "SELECT profileJson, sampleCount, totalWords, regeneratedAt FROM writing_profile WHERE userId = ? LIMIT 1",
+    [userId]
+  ) as any[];
+  return rows.length > 0 ? rows[0] : null;
+}
+
+export async function setWritingProfile(data: {
+  profileJson: string;
+  sampleCount: number;
+  totalWords: number;
+  userId?: number;
+}): Promise<void> {
+  const userId = data.userId ?? 1;
+  const existing = sqliteRun("SELECT id FROM writing_profile WHERE userId = ? LIMIT 1", [userId]) as any[];
+  if (existing.length > 0) {
+    sqliteRun(
+      "UPDATE writing_profile SET profileJson = ?, sampleCount = ?, totalWords = ?, regeneratedAt = ? WHERE userId = ?",
+      [data.profileJson, data.sampleCount, data.totalWords, Date.now(), userId]
+    );
+  } else {
+    sqliteInsert(
+      "INSERT INTO writing_profile (userId, profileJson, sampleCount, totalWords, regeneratedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+      [userId, data.profileJson, data.sampleCount, data.totalWords, Date.now(), Date.now()]
+    );
+  }
+}
+
+export async function clearWritingProfile(userId: number = 1): Promise<void> {
+  sqliteRun("DELETE FROM writing_profile WHERE userId = ?", [userId]);
+}
+
+// ── Navigator Sessions ──────────────────────────────────────────────────────
+// Persistent Playwright storageState blobs. The DB only tracks metadata —
+// the actual JSON blob lives at storagePath on disk.
+
+export interface NavSession {
+  id: number;
+  name: string;
+  description: string | null;
+  storagePath: string;
+  origin: string | null;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export async function addNavSession(data: {
+  name: string;
+  description?: string | null;
+  storagePath: string;
+  origin?: string | null;
+}): Promise<number> {
+  return sqliteInsert(
+    "INSERT INTO nav_sessions (name, description, storagePath, origin, createdAt) VALUES (?, ?, ?, ?, ?)",
+    [data.name, data.description ?? null, data.storagePath, data.origin ?? null, Date.now()]
+  );
+}
+
+export async function listNavSessions(): Promise<NavSession[]> {
+  return sqliteRun("SELECT * FROM nav_sessions ORDER BY lastUsedAt DESC, createdAt DESC") as any[];
+}
+
+export async function getNavSessionById(id: number): Promise<NavSession | null> {
+  const rows = sqliteRun("SELECT * FROM nav_sessions WHERE id = ? LIMIT 1", [id]) as any[];
+  return rows.length > 0 ? (rows[0] as NavSession) : null;
+}
+
+export async function getNavSessionByName(name: string): Promise<NavSession | null> {
+  const rows = sqliteRun("SELECT * FROM nav_sessions WHERE name = ? LIMIT 1", [name]) as any[];
+  return rows.length > 0 ? (rows[0] as NavSession) : null;
+}
+
+export async function touchNavSession(id: number): Promise<void> {
+  sqliteRun("UPDATE nav_sessions SET lastUsedAt = ? WHERE id = ?", [Date.now(), id]);
+}
+
+export async function deleteNavSession(id: number): Promise<void> {
+  sqliteRun("DELETE FROM nav_sessions WHERE id = ?", [id]);
+}
+
+// ── Navigator Audit Log ─────────────────────────────────────────────────────
+// Append-only log for high-stakes actions. Every typed-confirmation decision
+// gets recorded here whether approved or rejected, so there's always a
+// provable trail of user intent.
+
+export async function addNavAuditEntry(data: {
+  taskId: string;
+  goal: string;
+  actionJson: string;
+  confirmationPhrase: string;
+  userProvidedText: string;
+  approved: boolean;
+}): Promise<number> {
+  return sqliteInsert(
+    `INSERT INTO nav_audit_log
+       (taskId, goal, actionJson, confirmationPhrase, userProvidedText, approved, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      data.taskId,
+      data.goal,
+      data.actionJson,
+      data.confirmationPhrase,
+      data.userProvidedText,
+      data.approved ? 1 : 0,
+      Date.now(),
+    ]
+  );
+}
+
+export async function listNavAuditLog(limit: number = 100): Promise<any[]> {
+  return sqliteRun(
+    "SELECT * FROM nav_audit_log ORDER BY createdAt DESC LIMIT ?",
+    [limit]
+  ) as any[];
 }
 

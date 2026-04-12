@@ -2,6 +2,11 @@
  * JARVIS startup script
  * Starts ChromaDB (vector store) and the main server
  */
+// IMPORTANT: this import MUST come first so the console monkey-patch runs
+// before any other module gets a chance to log. ES module imports execute
+// in source order, and this one has to beat _core/index.js below.
+import "./server/consoleTimestamp.js";
+
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
@@ -44,13 +49,17 @@ function startChromaDB() {
     console.log(`[ChromaDB] Failed to start: ${err.message}`);
   });
 
-  // Shut down ChromaDB when the main process exits
+  // Shut down ChromaDB when the main process exits.
+  // NOTE: do NOT call process.exit() here — server/sqlite-init.ts
+  // registers its own SIGINT/SIGTERM handler that flushes jarvis.db to
+  // disk and then exits. Calling process.exit() here would race that
+  // flush and leave the DB half-written.
   const cleanup = () => {
     try { child.kill(); } catch {}
   };
   process.on("exit", cleanup);
-  process.on("SIGINT", () => { cleanup(); process.exit(); });
-  process.on("SIGTERM", () => { cleanup(); process.exit(); });
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
 
   console.log("[ChromaDB] Started on http://localhost:8000");
   return child;

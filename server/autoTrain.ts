@@ -13,8 +13,13 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
-import { getDatabase, saveDatabase } from "./sqlite-init.js";
+import { execSync, execFileSync } from "child_process";
+import { getDatabase, markDbDirty } from "./sqlite-init.js";
+
+function isReadOnlySql(sql: string): boolean {
+  const trimmed = sql.trimStart().toUpperCase();
+  return trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN");
+}
 import { logger } from "./logger.js";
 import { ollamaChatBackground as ollamaChat, ollamaChatJson, JSON_MODEL } from "./ollama.js";
 import { recordEvent as recordImprovementEvent } from "./improvementFeed.js";
@@ -34,6 +39,8 @@ if (!fs.existsSync(MODELS_DIR)) {
 }
 
 // ── SQLite helpers ──────────────────────────────────────────────────────────
+// Dirty-flag model: mark the DB dirty on writes, let the autosave tick
+// persist. See db.ts comment for the full rationale.
 function sqliteRun(sql: string, params: any[] = []): any[] {
   const db = getDatabase();
   const stmt = db.prepare(sql);
@@ -41,7 +48,7 @@ function sqliteRun(sql: string, params: any[] = []): any[] {
   const results: any[] = [];
   while (stmt.step()) results.push(stmt.getAsObject());
   stmt.free();
-  saveDatabase();
+  if (!isReadOnlySql(sql)) markDbDirty();
   return results;
 }
 
@@ -51,7 +58,7 @@ function sqliteInsert(sql: string, params: any[] = []): number {
   stmt.bind(params);
   stmt.step();
   stmt.free();
-  saveDatabase();
+  markDbDirty();
   return (db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number) ?? 1;
 }
 
@@ -383,6 +390,15 @@ export async function trainNewModel(
   await logger.info("autoTrain", `Starting training: ${newModelName}`);
 
   try {
+    // Python on Windows accepts forward slashes in paths, and this avoids
+    // having to escape backslashes inside Python string literals (e.g. the
+    // "\U" in "C:\Users" which Python treats as a unicode escape). We also
+    // drop the "./" prefix that used to be glued onto MODELS_DIR — MODELS_DIR
+    // is already absolute, so "./" + "C:\..." produced nonsense paths.
+    const pyPath = (p: string) => p.replace(/\\/g, "/");
+    const trainingDataPathPy = pyPath(trainingDataPath);
+    const outputDirPy = pyPath(path.join(MODELS_DIR, newModelName));
+
     const trainScript = `
 import json
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
@@ -398,13 +414,13 @@ tokenizer.pad_token = tokenizer.eos_token
 lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
 model = get_peft_model(model, lora_config)
 
-dataset = load_dataset("json", data_files="${trainingDataPath}")
+dataset = load_dataset("json", data_files="${trainingDataPathPy}")
 
 def format_prompt(example):
     return f"### Instruction:\\n{example['instruction']}\\n\\n### Response:\\n{example['output']}"
 
 training_args = TrainingArguments(
-    output_dir="./${MODELS_DIR}/${newModelName}",
+    output_dir="${outputDirPy}",
     num_train_epochs=3, per_device_train_batch_size=4, gradient_accumulation_steps=4,
     learning_rate=2e-4, logging_steps=10, save_steps=100, warmup_steps=50, fp16=True,
 )
@@ -412,8 +428,8 @@ training_args = TrainingArguments(
 trainer = SFTTrainer(model=model, train_dataset=dataset["train"], args=training_args,
     peft_config=lora_config, formatting_func=format_prompt, max_seq_length=512)
 trainer.train()
-model.save_pretrained("./${MODELS_DIR}/${newModelName}")
-tokenizer.save_pretrained("./${MODELS_DIR}/${newModelName}")
+model.save_pretrained("${outputDirPy}")
+tokenizer.save_pretrained("${outputDirPy}")
 print("Training complete!")
 `;
 
@@ -421,10 +437,25 @@ print("Training complete!")
     fs.writeFileSync(scriptPath, trainScript);
 
     console.log("\n🚀 Starting model training...");
-    execSync(`python ${scriptPath}`, { stdio: "inherit" });
+    // Use execFileSync with args-as-array so paths containing spaces
+    // (e.g. "jarvis-ai v6") don't get split by the shell. Previously this
+    // used a template-string command which broke on any Windows install
+    // whose project directory had a space in it.
+    execFileSync("python", [scriptPath], { stdio: "inherit" });
 
     await logger.info("autoTrain", "Converting model to GGUF format");
-    execSync(`python -m llama_cpp.convert --model ${MODELS_DIR}/${newModelName} --outfile ${MODELS_DIR}/${newModelName}.gguf`, { stdio: "inherit" });
+    execFileSync(
+      "python",
+      [
+        "-m",
+        "llama_cpp.convert",
+        "--model",
+        path.join(MODELS_DIR, newModelName),
+        "--outfile",
+        path.join(MODELS_DIR, `${newModelName}.gguf`),
+      ],
+      { stdio: "inherit" }
+    );
 
     const modelfile = `
 FROM ./${MODELS_DIR}/${newModelName}.gguf
@@ -436,7 +467,7 @@ SYSTEM """You are JARVIS, Trevor's personal AI assistant."""
     const modelfilePath = path.join(MODELS_DIR, `${newModelName}.Modelfile`);
     fs.writeFileSync(modelfilePath, modelfile);
 
-    execSync(`ollama create ${newModelName} -f ${modelfilePath}`, { stdio: "inherit" });
+    execFileSync("ollama", ["create", newModelName, "-f", modelfilePath], { stdio: "inherit" });
 
     // Save to database
     if (USE_MYSQL) {
@@ -615,10 +646,12 @@ export function startAutoTraining(intervalMs = 7 * 24 * 60 * 60 * 1000): void {
   if (trainingInterval) return;
   logger.info("autoTrain", "🤖 Auto-training enabled (runs weekly)");
 
-  weeklyModelUpdate().catch(err =>
-    logger.error("autoTrain", `Initial training failed: ${err}`)
-  );
-
+  // Do NOT kick off weeklyModelUpdate() on startup. The pipeline runs up to
+  // 50 sequential Ollama JSON calls for synthetic Q/A generation (pinning
+  // Ollama for 25-50 min) and then shells out to a Python training script
+  // that currently fails fast on most machines — boots would appear stuck
+  // for tens of minutes before any error surfaced. The interval timer below
+  // still runs it weekly, and weeklyModelUpdate() remains callable manually.
   trainingInterval = setInterval(async () => {
     await weeklyModelUpdate();
   }, intervalMs);

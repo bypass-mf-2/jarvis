@@ -36,6 +36,26 @@ import {
   loadVoiceProfile,
   writeInTrevorsVoice,
 } from "./voiceLearning.js";
+import {
+  listSamples as listWritingSamplesModule,
+  getProfile as getWritingProfileModule,
+  regenerateWritingProfile,
+  deleteWritingSample as deleteWritingSampleModule,
+} from "./writingProfile.js";
+import {
+  startNavigationTask,
+  getRun as getNavRun,
+  listRuns as listNavRuns,
+  stopTask as stopNavTask,
+  resolvePendingAction as resolveNavPending,
+  resolveTypedConfirmation as resolveNavTyped,
+  beginCaptureSession,
+  finalizeCaptureSession,
+  cancelCaptureSession,
+  listSessions as listNavSessions,
+  deleteSession as deleteNavSession,
+} from "./navigator.js";
+import { listNavAuditLog } from "./db";
 import { logger } from "./logger";
 import { ragChat } from "./rag";
 import { scrapeSource, scrapeAllSources, isScraperEnabled, setScraperEnabled } from "./scraper";
@@ -686,6 +706,164 @@ const multiAgentRouter = router({
   }),
 });
 
+// ── Writing Profile Router ────────────────────────────────────────────────────
+// Personal writing samples for voice learning. SEPARATE from the regular
+// knowledge base — these never feed RAG, only the chat system prompt.
+const writingProfileRouter = router({
+  // List all uploaded samples (metadata only — rawText is too big to ship
+  // on every list call).
+  listSamples: publicProcedure.query(async () => {
+    const samples = await listWritingSamplesModule();
+    return samples.map((s) => ({
+      id: s.id,
+      originalName: s.originalName,
+      category: s.category,
+      description: s.description,
+      wordCount: s.wordCount,
+      analyzed: !!s.analyzedAt,
+      analyzedAt: s.analyzedAt,
+      createdAt: s.createdAt,
+    }));
+  }),
+
+  // Return the current aggregated profile (or null if no samples yet).
+  getProfile: publicProcedure.query(async () => {
+    return getWritingProfileModule();
+  }),
+
+  // Force a profile rebuild across all currently-stored samples. Useful
+  // after deleting samples or after an LLM upgrade so the profile reflects
+  // the latest analyses.
+  regenerate: publicProcedure.mutation(async () => {
+    const profile = await regenerateWritingProfile();
+    return { success: true, profile };
+  }),
+
+  // Delete a sample by id. Also unlinks the file on disk and re-aggregates
+  // the profile.
+  deleteSample: publicProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      await deleteWritingSampleModule(input.id);
+      return { success: true };
+    }),
+});
+
+// ── Navigator Router ──────────────────────────────────────────────────────────
+// Playwright-driven browser automation. See server/navigator.ts for the
+// safety model. Every destructive action requires explicit user approval
+// via the approveAction mutation.
+const navigatorRouter = router({
+  startTask: publicProcedure
+    .input(
+      z.object({
+        goal: z.string().min(5),
+        allowlist: z.array(z.string()).optional(),
+        maxSteps: z.number().min(1).max(30).optional(),
+        allowDestructive: z.boolean().optional(),
+        highStakes: z.boolean().optional(),
+        headless: z.boolean().optional(),
+        sessionId: z.number().nullable().optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const taskId = await startNavigationTask(input);
+      return { taskId };
+    }),
+
+  // Return the current state of a single run (used for polling while the
+  // agent is working). Omits extractedText to keep the payload small; the
+  // UI can request the full run for a detailed view.
+  getRun: publicProcedure
+    .input(z.object({ taskId: z.string() }))
+    .query(({ input }) => {
+      const run = getNavRun(input.taskId);
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Unknown taskId" });
+      return run;
+    }),
+
+  listRuns: publicProcedure.query(() => {
+    // Strip the rawText extract fields for list view to keep it lightweight.
+    return listNavRuns().map((r) => ({
+      taskId: r.taskId,
+      goal: r.goal,
+      status: r.status,
+      stepCount: r.steps.length,
+      finalResult: r.finalResult,
+      error: r.error,
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      pendingAction: r.pendingAction,
+    }));
+  }),
+
+  stopTask: publicProcedure
+    .input(z.object({ taskId: z.string() }))
+    .mutation(async ({ input }) => {
+      await stopNavTask(input.taskId);
+      return { success: true };
+    }),
+
+  // Approve or reject a pending destructive action (simple single-click
+  // confirmation for non-high-stakes tasks).
+  resolvePending: publicProcedure
+    .input(z.object({ taskId: z.string(), approve: z.boolean() }))
+    .mutation(async ({ input }) => {
+      await resolveNavPending(input.taskId, input.approve);
+      return { success: true };
+    }),
+
+  // Typed-confirmation approval for high-stakes tasks. User must type the
+  // exact requiredConfirmationPhrase. Anything else rejects and logs.
+  resolveTyped: publicProcedure
+    .input(z.object({ taskId: z.string(), userText: z.string() }))
+    .mutation(async ({ input }) => {
+      return resolveNavTyped(input.taskId, input.userText);
+    }),
+
+  // ── Sessions (credential passthrough) ────────────────────────────────
+  listSessions: publicProcedure.query(async () => {
+    return listNavSessions();
+  }),
+
+  beginCapture: publicProcedure
+    .input(z.object({ startUrl: z.string().optional() }).optional())
+    .mutation(async ({ input }) => {
+      return beginCaptureSession(input?.startUrl);
+    }),
+
+  finalizeCapture: publicProcedure
+    .input(
+      z.object({
+        name: z.string().min(1).max(100),
+        description: z.string().optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const session = await finalizeCaptureSession(input.name, input.description ?? null);
+      return session;
+    }),
+
+  cancelCapture: publicProcedure.mutation(async () => {
+    await cancelCaptureSession();
+    return { success: true };
+  }),
+
+  deleteSession: publicProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      await deleteNavSession(input.id);
+      return { success: true };
+    }),
+
+  // ── Audit log (high-stakes decisions) ────────────────────────────────
+  listAuditLog: publicProcedure
+    .input(z.object({ limit: z.number().min(1).max(500).default(100) }).optional())
+    .query(async ({ input }) => {
+      return listNavAuditLog(input?.limit ?? 100);
+    }),
+});
+
 // ── App Router ────────────────────────────────────────────────────────────────
 export const appRouter = router({
   system: systemRouter,
@@ -710,7 +888,9 @@ export const appRouter = router({
   code: codeRouter,
   search: searchRouter,
   settings: settingsRouter,
-  multiAgent: multiAgentRouter, // ← ADD THIS LINE
+  multiAgent: multiAgentRouter,
+  writingProfile: writingProfileRouter,
+  navigator: navigatorRouter,
 });
 
 export type AppRouter = typeof appRouter;

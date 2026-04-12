@@ -13,6 +13,7 @@ import { searchWeb } from "./webSearch.js";
 import { isScraperEnabled } from "./scraper.js";
 import { smartRouteModel } from "./autoTrain.js";
 import { recordChunkRetrieval, incrementDomainRetrievals } from "./db";
+import { getWritingProfileSystemPrompt } from "./writingProfile.js";
 
 const JARVIS_SYSTEM_PROMPT = `You are JARVIS (Just A Rather Very Intelligent System), a highly capable AI assistant inspired by Tony Stark's AI. You are helpful, precise, and occasionally witty. You have access to a continuously updated knowledge base scraped from the internet.
 
@@ -65,6 +66,20 @@ You can use this to understand the chronological order of events and calculate t
     // ✅ ADD THIS: Include memory in system prompt
   if (memoryContext) {
     systemContent += "\n\n" + memoryContext;
+  }
+
+  // ✅ USER VOICE PROFILE: if the user has uploaded writing samples, inject
+  // the aggregated style profile so Jarvis mirrors their voice. These are
+  // samples uploaded via /writing-profile — completely separate from RAG
+  // content. The helper returns "" when no samples exist, so this is a
+  // no-op cost for users who haven't set up a profile.
+  try {
+    const voicePrompt = await getWritingProfileSystemPrompt();
+    if (voicePrompt) {
+      systemContent += "\n\n" + voicePrompt;
+    }
+  } catch (err) {
+    await logger.warn("rag", `Failed to load writing profile: ${String(err)}`);
   }
 
   // Track chunk retrievals for domain quality scoring

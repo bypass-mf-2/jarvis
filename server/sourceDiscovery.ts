@@ -32,6 +32,7 @@ import {
   upsertDomainScore,
   getDomainScore,
   getTopDomains,
+  recomputeDomainQualityScores,
 } from "./db";
 import { getScraperStats, getTotalScrapingCost } from "./aggressiveScraper.js";
 import { isScraperEnabled } from "./scraper.js";
@@ -242,6 +243,17 @@ async function runDiscoveryCycle(): Promise<void> {
   _crawling = true;
 
   try {
+    // Improvement ④: recompute domain quality scores from retrieval data
+    // before fetching top domains. Without this, quality_score sits at the
+    // default 0.5 forever and handleSeedFromDomains seeds from arbitrary
+    // domains instead of the ones RAG actually uses.
+    try {
+      const scored = await recomputeDomainQualityScores();
+      await logger.info("sourceDiscovery", `Recomputed quality scores for ${scored} domains`);
+    } catch (err) {
+      await logger.warn("sourceDiscovery", `Quality recompute failed: ${String(err)}`);
+    }
+
     const worker = getWorker();
     const recentlyUsedTopics = await getRecentlyUsedTopics(6 * 60 * 60 * 1000);
 

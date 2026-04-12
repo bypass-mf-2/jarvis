@@ -16,8 +16,14 @@ import {
   startAutoTraining,
 } from "./autoTrain.js";
 
-// Default RSS sources to seed on first run — focused on research, science, and programming knowledge
-const DEFAULT_SOURCES = [
+// Default sources to seed on first run — focused on research, science, and programming knowledge.
+// Mix of RSS feeds (auto-polled) and custom_url pages (scraped once, links harvested).
+const DEFAULT_SOURCES: Array<{
+  name: string;
+  url: string;
+  type: "rss" | "custom_url";
+  intervalMinutes: number;
+}> = [
   // ── Research papers & academic ────────────────────────────────────────────
   { name: "ArXiv AI",                 url: "https://arxiv.org/rss/cs.AI",                 type: "rss" as const, intervalMinutes: 30 },
   { name: "ArXiv Machine Learning",   url: "https://arxiv.org/rss/cs.LG",                 type: "rss" as const, intervalMinutes: 30 },
@@ -83,6 +89,34 @@ const DEFAULT_SOURCES = [
   { name: "Quanta Magazine",          url: "https://www.quantamagazine.org/feed/",        type: "rss" as const, intervalMinutes: 240 },
   { name: "Ars Technica Science",     url: "https://feeds.arstechnica.com/arstechnica/science", type: "rss" as const, intervalMinutes: 60 },
   { name: "Wikipedia Featured",       url: "https://en.wikipedia.org/w/api.php?action=featuredfeed&feed=featured&feedformat=rss", type: "rss" as const, intervalMinutes: 720 },
+
+  // ── User-added research pages (custom_url: scraped once, links harvested) ─
+  { name: "Reddit — CMV Hitler thread",        url: "https://www.reddit.com/r/changemyview/comments/3pinwx/cmv_hitler_was_a_great_leader/", type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "FBI Vault — Nikola Tesla",          url: "https://vault.fbi.gov/nikola-tesla",                                                    type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "Britannica — Nikola Tesla",         url: "https://www.britannica.com/biography/Nikola-Tesla",                                     type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "Google Scholar — abortion",         url: "https://scholar.google.com/scholar?hl=en&as_sdt=4006&q=abortion&btnG=",                 type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "Google Scholar — AI",               url: "https://scholar.google.com/scholar?hl=en&as_sdt=0%2C6&q=Ai&btnG=",                      type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "Simply Psychology — Freud",         url: "https://www.simplypsychology.org/sigmund-freud.html",                                   type: "custom_url" as const, intervalMinutes: 1440 },
+  { name: "Sweller 1988 — Cognitive Load PDF", url: "https://andymatuschak.org/files/papers/Sweller%20-%201988%20-%20Cognitive%20load%20during%20problem%20solving.pdf", type: "custom_url" as const, intervalMinutes: 10080 },
+
+  // ── W3Schools tutorials (scraped once, sitemap probe harvests the rest) ──
+  // One landing page per topic; the sitemap probe on first scrape will
+  // enqueue the full w3schools.com sitemap into the crawl frontier, so
+  // all individual tutorial pages get pulled in automatically.
+  { name: "W3Schools — Python",          url: "https://www.w3schools.com/python/",                 type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — JavaScript",      url: "https://www.w3schools.com/js/default.asp",          type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — HTML",            url: "https://www.w3schools.com/html/default.asp",        type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — CSS",             url: "https://www.w3schools.com/css/default.asp",         type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Java",            url: "https://www.w3schools.com/java/default.asp",        type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — How To",          url: "https://www.w3schools.com/howto/default.asp",       type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — React",           url: "https://www.w3schools.com/react/default.asp",       type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Node.js",         url: "https://www.w3schools.com/nodejs/default.asp",      type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Git",             url: "https://www.w3schools.com/git/default.asp",         type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — AI",              url: "https://www.w3schools.com/ai/default.asp",          type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Generative AI",   url: "https://www.w3schools.com/gen_ai/index.php",        type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Cybersecurity",   url: "https://www.w3schools.com/cybersecurity/index.php", type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Data Science",    url: "https://www.w3schools.com/datascience/default.asp", type: "custom_url" as const, intervalMinutes: 10080 },
+  { name: "W3Schools — Programming",     url: "https://www.w3schools.com/programming/index.php",   type: "custom_url" as const, intervalMinutes: 10080 },
 ];
 
 export async function startBackgroundServices(): Promise<void> {

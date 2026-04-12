@@ -16,6 +16,8 @@ import {
   incrementConsecutiveZeroScrapes,
   resetConsecutiveZeroScrapes,
   toggleScrapeSource,
+  addToFrontier,
+  isFrontierUrl,
 } from "./db";
 
 // Auto-disable a source after this many consecutive scrapes that returned
@@ -27,65 +29,108 @@ import { addToVectorStore } from "./vectorStore";
 import { logger } from "./logger";
 import { fetchWithRetry } from "./webSearch";
 import { recordEvent as recordImprovementEvent } from "./improvementFeed";
+import { chunkText } from "./chunking";
+import { extractReadableContent } from "./htmlExtract";
+import { discoverSitemapUrls, filterCrawlableUrls } from "./sitemap";
 
-// ── Content Deduplication Cache ─────────────────────────────────────────────
-// Track content hashes to prevent duplicate scraping from same source
-const contentHashCache = new Map<string, Set<string>>(); // sourceUrl -> Set<contentHash>
-const MAX_CACHE_SIZE = 10000; // Per source
+// Sitemap probing is per-ORIGIN (not per-source-URL) so adding many landing
+// pages from the same domain — e.g., 14 W3Schools topic pages — triggers
+// exactly one sitemap probe for that domain instead of 14 redundant fetches.
+// Restart is what it takes to re-probe (e.g., if a site adds a sitemap).
+const _sitemapProbedOrigins = new Set<string>();
 
-// Generate hash of content for deduplication
-function hashContent(content: string): string {
-  return crypto.createHash('sha256').update(content.toLowerCase().trim()).digest('hex');
+function getOrigin(url: string): string | null {
+  try { return new URL(url).origin; } catch { return null; }
 }
 
-// Check if content already exists from this source
+// ── Content Deduplication Cache ─────────────────────────────────────────────
+// Improvement ③: fuzzy dedup with aggressive normalization.
+//
+// Old behavior: exact hash match of (lowercase + trim) content, per source,
+// cache seeded with only the 1000 most recent chunks. That missed a lot:
+//  - same article re-scraped from a different URL → stored twice
+//  - same article with one word changed → stored twice
+//  - restart threw away 90%+ of the dedup history (we have 11k+ chunks)
+//
+// New behavior:
+//  - Global cache (not per-source). The same content from two different URLs
+//    is now caught as a duplicate.
+//  - Aggressive normalization before hashing: lowercase, strip ALL whitespace,
+//    strip punctuation, hash the first 1200 chars. Catches re-publishes and
+//    minor edits. The 1200-char prefix catches articles whose first paragraph
+//    is identical even if the tail diverges.
+//  - Full dedup history loaded at startup, not just 1000 chunks.
+//  - Retains sourceUrl → Set<hash> shape for stats/debugging, but matches
+//    globally via a flat Set<string>.
+const contentHashCache = new Map<string, Set<string>>(); // sourceUrl -> Set<contentHash>  (kept for stats/logging)
+const globalHashCache = new Set<string>();                // hash -> seen anywhere
+const MAX_CACHE_SIZE = 10000; // Per source — safety cap for per-source stats
+
+// Normalize content before hashing. This is the heart of the fuzzy dedup:
+// two chunks that differ only in whitespace, capitalization, or punctuation
+// will produce the same normalized string and the same hash.
+function normalizeForHash(content: string): string {
+  return content
+    .toLowerCase()
+    .replace(/[\s]+/g, "")         // strip all whitespace
+    .replace(/[^\p{L}\p{N}]/gu, "") // strip everything except letters + digits
+    .slice(0, 1200);                // first 1200 normalized chars (~300 words)
+}
+
+function hashContent(content: string): string {
+  return crypto.createHash("sha256").update(normalizeForHash(content)).digest("hex");
+}
+
+// Check if content already exists anywhere in the knowledge base.
+// Uses the global cache so cross-source duplicates are caught.
 async function isContentDuplicate(sourceUrl: string, content: string): Promise<boolean> {
   const contentHash = hashContent(content);
-  
-  // Check in-memory cache first (fast)
+
+  if (globalHashCache.has(contentHash)) {
+    return true;
+  }
+  globalHashCache.add(contentHash);
+
+  // Also track per-source for visibility (stats and cache trimming).
   if (!contentHashCache.has(sourceUrl)) {
     contentHashCache.set(sourceUrl, new Set());
   }
-  
   const sourceCache = contentHashCache.get(sourceUrl)!;
-  
-  if (sourceCache.has(contentHash)) {
-    return true; // Duplicate found in cache
-  }
-  
-  // If cache is full, clear oldest entries
   if (sourceCache.size >= MAX_CACHE_SIZE) {
     const firstHash = sourceCache.values().next().value;
-    if (firstHash !== undefined) {
-      sourceCache.delete(firstHash);
-    }
+    if (firstHash !== undefined) sourceCache.delete(firstHash);
   }
-  
-  // Add to cache for future checks
   sourceCache.add(contentHash);
-  
-  return false; // Not a duplicate
+
+  return false;
 }
 
-// Initialize cache from database on startup
+// Initialize cache from database on startup. Previously capped at 1000 which
+// discarded ~90% of dedup history on a growing DB; now we load the full set
+// so a restart doesn't cause us to re-store thousands of duplicates.
 async function initializeDeduplicationCache(): Promise<void> {
   try {
-    const chunks = await getKnowledgeChunks(1000); // Get recent 1000 chunks
-    
+    // getKnowledgeChunks uses a limit param. Pass a huge number to fetch all.
+    const chunks = await getKnowledgeChunks(1_000_000);
+
     for (const chunk of chunks) {
-      const sourceUrl = chunk.sourceUrl || '';
+      const sourceUrl = chunk.sourceUrl || "";
       const contentHash = hashContent(chunk.content);
-      
+
+      globalHashCache.add(contentHash);
+
       if (!contentHashCache.has(sourceUrl)) {
         contentHashCache.set(sourceUrl, new Set());
       }
-      
       contentHashCache.get(sourceUrl)!.add(contentHash);
     }
-    
-    await logger.info('scraper', `Deduplication cache initialized with ${chunks.length} chunks`);
+
+    await logger.info(
+      "scraper",
+      `Deduplication cache initialized: ${chunks.length} chunks, ${globalHashCache.size} unique hashes across ${contentHashCache.size} sources`
+    );
   } catch (err) {
-    await logger.warn('scraper', `Failed to initialize dedup cache: ${err}`);
+    await logger.warn("scraper", `Failed to initialize dedup cache: ${err}`);
   }
 }
 
@@ -119,21 +164,8 @@ function stripHtml(html: string, baseUrl?: string): string {
     .trim();
 }
 
-function chunkText(text: string, maxChars = 800): string[] {
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  const chunks: string[] = [];
-  let current = "";
-  for (const sentence of sentences) {
-    if ((current + " " + sentence).length > maxChars && current) {
-      chunks.push(current.trim());
-      current = sentence;
-    } else {
-      current += (current ? " " : "") + sentence;
-    }
-  }
-  if (current.trim()) chunks.push(current.trim());
-  return chunks.filter((c) => c.length > 80);
-}
+// chunkText imported from ./chunking — shared across scraper, crawlWorker,
+// and fileIngestion. Sentence-based with overlap and a minimum length filter.
 
 // ── RSS Feed scraper ──────────────────────────────────────────────────────────
 async function scrapeRSS(url: string): Promise<Array<{ title: string; content: string; link: string }>> {
@@ -169,6 +201,15 @@ async function scrapeRSS(url: string): Promise<Array<{ title: string; content: s
 }
 
 // ── Generic URL scraper ───────────────────────────────────────────────────────
+// Fetches a page and extracts "the article" via Readability (Firefox reader
+// mode). Falls back to regex-based stripHtml if Readability can't find a
+// main content block (common for search-result pages and index pages).
+//
+// Content cap raised from 8000 → 100_000 chars. Most real articles are
+// 5-30k chars; the old 8k cap truncated more than half of every long post
+// and silently threw away the majority of downstream chunks.
+const SCRAPE_CONTENT_CAP = 100_000;
+
 async function scrapeURL(url: string): Promise<{ title: string; content: string }> {
   const res = await fetchWithRetry(url, {
     headers: {
@@ -179,21 +220,41 @@ async function scrapeURL(url: string): Promise<{ title: string; content: string 
     signal: AbortSignal.timeout(20_000),
   });
   if (!res.ok) throw new Error(`URL fetch failed: ${res.status}`);
+
+  const contentType = res.headers.get("content-type") || "";
+
+  // PDFs can't be extracted by Readability or stripHtml. The scraper
+  // path doesn't currently handle them; fileIngestion.ts is the right
+  // place for binary formats. Return an empty body and a title so the
+  // source entry is still recorded as "attempted".
+  if (contentType.includes("application/pdf") || url.toLowerCase().endsWith(".pdf")) {
+    await logger.warn("scraper", `PDF skipped in URL scraper (use fileIngestion for ${url})`);
+    return { title: url.split("/").pop() || url, content: "" };
+  }
+
   const html = await res.text();
 
-  // Extract title
+  // Prefer Readability — strips nav/footer/ads and finds the real article.
+  const readable = extractReadableContent(html, url);
+  if (readable && readable.text.length >= 400) {
+    return {
+      title: readable.title || url,
+      content: readable.text.slice(0, SCRAPE_CONTENT_CAP),
+    };
+  }
+
+  // Fallback: regex-based extraction for pages Readability rejects
+  // (index pages, dashboards, search results, etc.)
   const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
   const title = stripHtml(titleMatch?.[1] ?? "").trim() || url;
 
-  // Extract main content (prefer <article>, <main>, <body>)
   let contentHtml =
     html.match(/<article[^>]*>([\s\S]*?)<\/article>/i)?.[1] ||
     html.match(/<main[^>]*>([\s\S]*?)<\/main>/i)?.[1] ||
     html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ||
     html;
 
-  // Pass the page URL so relative anchor hrefs resolve to absolute links.
-  const content = stripHtml(contentHtml, url).slice(0, 8000);
+  const content = stripHtml(contentHtml, url).slice(0, SCRAPE_CONTENT_CAP);
   return { title, content };
 }
 
@@ -336,6 +397,41 @@ async function scrapeSource(source: any): Promise<{ success: boolean; chunks: nu
       const { title, content } = await scrapeURL(url);
       itemsParsed = content && content.trim().length > 0 ? 1 : 0;
       totalChunks = await storeChunks(id, url, name, "custom_url", content, title);
+
+      // Improvement ⑤: after the first successful custom_url scrape, probe
+      // the source's origin for a sitemap. Any URLs found are enqueued into
+      // crawl_frontier so the background crawler works through them — one
+      // "source" like docs.python.org turns into thousands of pages without
+      // extra user configuration.
+      //
+      // De-dupe by origin: if the user adds 14 W3Schools landing pages, we
+      // only probe w3schools.com/sitemap.xml once, not 14 times.
+      const origin = getOrigin(url);
+      if (itemsParsed > 0 && origin && !_sitemapProbedOrigins.has(origin)) {
+        _sitemapProbedOrigins.add(origin);
+        try {
+          const sitemapUrls = await discoverSitemapUrls(url);
+          const crawlable = filterCrawlableUrls(sitemapUrls);
+          if (crawlable.length > 0) {
+            let enqueued = 0;
+            for (const u of crawlable) {
+              if (await isFrontierUrl(u)) continue;
+              let domain = "";
+              try { domain = new URL(u).hostname; } catch { continue; }
+              // depth=1, modest priority so they don't starve search-result
+              // discoveries. Will be picked up by the next frontier cycle.
+              await addToFrontier(u, domain, 1, 0.5, `sitemap:${name}`);
+              enqueued++;
+            }
+            await logger.info(
+              "scraper",
+              `Sitemap probe on ${name}: discovered ${sitemapUrls.length} URLs, enqueued ${enqueued} new ones`
+            );
+          }
+        } catch (err) {
+          await logger.warn("scraper", `Sitemap probe failed for ${name}: ${String(err)}`);
+        }
+      }
     }
 
     await updateScrapeSourceStatus(id, "success", undefined, totalChunks);

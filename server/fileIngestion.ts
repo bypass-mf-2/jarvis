@@ -188,13 +188,16 @@ async function processPDF(filepath: string): Promise<ProcessedFile> {
   const images: ProcessedImage[] = [];
   
   try {
-    // Extract text using pdf-parse or pdfjs-dist
-    const pdfParse = (await import("pdf-parse")) as any;
+    // Extract text using pdf-parse v2 API. The v2 package exports a
+    // PDFParse class — the old v1 call pattern `pdfParse(buffer)` throws
+    // "pdfParse is not a function" because the default export is undefined.
+    const { PDFParse } = await import("pdf-parse");
     const dataBuffer = fs.readFileSync(filepath);
-    const pdfData = await (pdfParse.default || pdfParse)(dataBuffer);
-    
+    const parser = new PDFParse({ data: dataBuffer });
+    const pdfData = await parser.getText();
+
     const text = pdfData.text;
-    const pageCount = pdfData.numpages;
+    const pageCount = pdfData.pages?.length ?? pdfData.total ?? 0;
     
     // Split into chunks
     const paragraphs = text.split(/\n\n+/);

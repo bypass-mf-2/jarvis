@@ -3,7 +3,12 @@
  * Pure JavaScript implementation - no native bindings
  */
 
-import { getDatabase, saveDatabase } from "./sqlite-init";
+import { getDatabase, markDbDirty } from "./sqlite-init";
+
+function isReadOnlySql(sql: string): boolean {
+  const trimmed = sql.trimStart().toUpperCase();
+  return trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN");
+}
 import type { Database as SqlJsDatabase } from "sql.js";
 import {
   users,
@@ -42,7 +47,7 @@ function runQuery(sql: string, params: any[] = []): any[] {
       results.push(stmt.getAsObject());
     }
     stmt.free();
-    saveDatabase();
+    if (!isReadOnlySql(sql)) markDbDirty();
     return results;
   } catch (error) {
     console.error("[DB] Query error:", sql, error);
@@ -57,7 +62,7 @@ function runInsert(sql: string, params: any[] = []): number {
     stmt.bind(params);
     stmt.step();
     stmt.free();
-    saveDatabase();
+    markDbDirty();
     return db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number ?? 1;
   } catch (error) {
     console.error("[DB] Insert error:", sql, error);
