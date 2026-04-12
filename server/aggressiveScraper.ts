@@ -127,15 +127,9 @@ class ScraperFleet {
   // ── Search via ScrapingAnt ──────────────────────────────────────────────
   private async searchScrapingAnt(query: string): Promise<any> {
     const apiKey = process.env.EXPO_PUBLIC_SCRAPING_ANT_API_KEY || process.env.SCRAPING_ANT_API_KEY;
-    if (!apiKey) throw new Error("ScrapingAnt API key missing");
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-    // ScrapingAnt expects x-api-key as a HEADER, not a query param.
     const response = await fetch(
-      `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&browser=false`,
-      {
-        headers: { "x-api-key": apiKey },
-        signal: AbortSignal.timeout(20_000),
-      }
+      `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${apiKey}&browser=false`
     );
 
     if (!response.ok) throw new Error(`ScrapingAnt error: ${response.status}`);
