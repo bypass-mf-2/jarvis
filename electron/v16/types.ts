@@ -50,7 +50,7 @@ export interface ClapEvent {
 
 /** Panel views the renderer can show. "idle" = window hidden; the rest are
  *  full-window panels reachable from the tray menu. "wake" is the overlay. */
-export type V16Panel = "idle" | "wake" | "workflows" | "memory" | "settings" | "phone" | "opinions" | "distillation" | "tunnel";
+export type V16Panel = "idle" | "wake" | "workflows" | "memory" | "settings" | "phone" | "opinions" | "distillation" | "tunnel" | "credentials";
 
 /** IPC channel names — centralized so typos don't silently break the bridge. */
 export const IPC_CHANNELS = {

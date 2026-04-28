@@ -27,6 +27,7 @@ import { PhonePanel } from "@/v16/PhonePanel";
 import { OpinionsPanel } from "@/v16/OpinionsPanel";
 import { DistillationPanel } from "@/v16/DistillationPanel";
 import { TunnelSetupPanel } from "@/v16/TunnelSetupPanel";
+import { CredentialsPanel } from "@/v16/CredentialsPanel";
 import type { WakeEvent, V16Panel } from "../types.js";
 import { startMicListener, stopMicListener } from "./mic.js";
 import { createAudioController } from "./audio.js";
@@ -202,6 +203,7 @@ export function App() {
         {state.panel === "opinions" && <OpinionsPanel />}
         {state.panel === "distillation" && <DistillationPanel />}
         {state.panel === "tunnel" && <TunnelSetupPanel />}
+        {state.panel === "credentials" && <CredentialsPanel />}
       </div>
     );
   }
@@ -226,7 +228,7 @@ function PanelHeader({
   panel,
   onClose,
 }: {
-  panel: "workflows" | "memory" | "settings" | "phone" | "opinions" | "distillation" | "tunnel";
+  panel: "workflows" | "memory" | "settings" | "phone" | "opinions" | "distillation" | "tunnel" | "credentials";
   onClose: () => void;
 }) {
   const labels = {
@@ -237,6 +239,7 @@ function PanelHeader({
     opinions: "Opinions",
     distillation: "Distillation",
     tunnel: "Cloudflare Tunnel",
+    credentials: "Credentials Vault",
   } as const;
   // Panel window has a native OS title bar with min/max/close — no need for
   // an in-renderer close button. This strip is just visual context for which

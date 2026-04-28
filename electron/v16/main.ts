@@ -582,6 +582,7 @@ function refreshTrayMenu(): void {
     { label: "Open Phone Notifications", click: () => openPanel("phone") },
     { label: "Open Distillation", click: () => openPanel("distillation") },
     { label: "Open Cloudflare Tunnel", click: () => openPanel("tunnel") },
+    { label: "Open Credentials Vault", click: () => openPanel("credentials") },
     { label: "Open Settings", click: () => openPanel("settings") },
     { type: "separator" },
     {
