@@ -1,5 +1,0 @@
-jarvis.db filter=lfs diff=lfs merge=lfs -text
-jarvis.db.backup-now filter=lfs diff=lfs merge=lfs -text
-chroma-data/chroma.sqlite3 filter=lfs diff=lfs merge=lfs -text
-entity-graph.json filter=lfs diff=lfs merge=lfs -text
-entity-graph.json.bak filter=lfs diff=lfs merge=lfs -text

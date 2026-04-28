@@ -1,2 +1,20 @@
 .env
 node_modules/
+
+# v16 wake audio — user-provided, never committed (copyright)
+wake-audio/
+
+# PDF / document folder-watch (user-dropped files, often copyrighted)
+incoming-pdfs/
+
+# GitHub repo scraper cache (cloned repo snapshots)
+github-cache/
+
+# Runtime data — auto-generated, never commit (was LFS-tracked, untracked 2026-04-28)
+jarvis.db
+jarvis.db.lock
+jarvis.db.backup-now
+entity-graph.json
+entity-graph.json.bak
+chroma-data/
+.manus-logs/
