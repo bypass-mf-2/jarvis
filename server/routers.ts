@@ -2816,6 +2816,28 @@ const opinionsRouter = router({
       deleteOpinion(input.id);
       return { success: true };
     }),
+
+  /**
+   * One-shot backfill: form opinions from accumulated corrections. Always
+   * preview with dryRun:true first. Idempotent — re-running only processes
+   * topics that don't already have an opinion.
+   */
+  backfillFromCorrections: publicProcedure
+    .input(
+      z.object({
+        dryRun: z.boolean().default(true),
+        minCorrections: z.number().int().min(1).max(20).default(2),
+        maxTopics: z.number().int().min(1).max(500).default(50),
+      }).optional()
+    )
+    .mutation(async ({ input }) => {
+      const { backfillOpinionsFromCorrections } = await import("./opinionBackfill.js");
+      return backfillOpinionsFromCorrections({
+        dryRun: input?.dryRun ?? true,
+        minCorrections: input?.minCorrections ?? 2,
+        maxTopics: input?.maxTopics ?? 50,
+      });
+    }),
 });
 
 // ── GitHub Repo Scraper Router ──────────────────────────────────────────────
