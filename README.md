@@ -853,6 +853,20 @@ With v16 making JARVIS daily-drivable on Windows, v17's job is to extend that ac
 
 **Scope**: ~2-3 months focused work. Smaller than v16 because most of the platform work is done — v17 is mostly UX polish + multi-device + commerce wiring.
 
+### Known limits v16 carries into v17
+
+These are the gaps left after v16 ships — what JARVIS still can't do. Each becomes a v17 (or later) target.
+
+1. **Reasoning ceiling.** The base LLM is the bottleneck. Local Llama 3.2 / Gemma is GPT-3.5-class. Hard math, novel theorem proofs, deep code refactors across 100+ files, abstract academic synthesis — those pin to whatever model you swap in. `smartChat` routes heavy work to cloud Groq Llama-70B but you're still capped by what the model can do. **v17 fix**: GPU server online → swap `OLLAMA_REASONING_MODEL=llama3.1:70b` (or DeepSeek 32B) and the routing layer just picks it up.
+2. **Continuous physical action.** Driving a robot, controlling IoT devices outside your computer, anything with hands — not in scope. **v17 fix**: out of scope; v18+ topic if it ever matters.
+3. **Real-time video/audio understanding.** Can OCR a screenshot. Can transcribe an audio file. Can't watch a livestream and react to it as it happens. **v17 fix**: would need a streaming-vision model (Gemini 2.0 Flash, GPT-4o-realtime). Doable as an opt-in cloud feature.
+4. **True learning from a single example.** LoRA fine-tunes weekly in batch. Tell JARVIS "I prefer X" and it remembers via the opinion system, but it doesn't update its weights from one correction the way you'd want a human assistant to. **v17 fix**: smaller, faster LoRA cycles (daily instead of weekly) once GPU server is online; opinion system already gives the immediate-recall behavior at the prompt level.
+5. **Cross-device today.** Desktop is solid. Mobile companion app is v17. Until then, phone interaction is one-direction notifications + reply-via-ntfy. **v17 fix**: native iOS/Android app (item 1 of the v17 roadmap above).
+6. **Native UI on macOS/Linux.** nut-js is cross-platform but window-title matching is Windows-tested. macOS would mostly work; Linux varies. **v17 fix**: smoke-test on macOS, document the gaps. Linux-on-Wayland may need a different lib.
+7. **Apps with Captcha walls / bot detection.** Navigator + native control will both fail on sites that look hard at automation signals. **v17 fix**: limited — this is an arms race the indie side loses. Workaround: use stored credentials + 2FA, do the captcha manually once, JARVIS picks up the resulting session cookie.
+8. **Audio output past ElevenLabs free tier.** 10K chars/month. Voice replies are ~50-200 chars each so you get ~50-200 voice replies/month free, then it's $5/mo for 30K or $11/mo for 100K. **v17 fix**: optional — wire local Coqui or Piper TTS as a fallback. Already half-plumbed in `voicecloning.ts`; needs the model swap path completed.
+9. **Genuine creativity.** Can recombine. Can't invent. **v17 fix**: this isn't really fixable — it's a property of the underlying LLM family. Best we can do is widen the recombination surface (more knowledge, more workflows) so the recombinations look more creative.
+
 ---
 
 ## Execution Path
