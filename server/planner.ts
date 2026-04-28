@@ -41,6 +41,40 @@ import { smartChat } from "./ollama.js";
 import { logger } from "./logger.js";
 import { recordReflection } from "./reflection.js";
 
+// ── Credential handle store ──────────────────────────────────────────────────
+// Plaintext credential fields NEVER enter the planner's step-output context
+// (the LLM sees that context during replanning). Instead, getCredential
+// allocates a short opaque handle, stashes the plaintext in this in-memory
+// map, and returns the handle. Subsequent tools (controlApp.typeCredentialField)
+// look the handle up server-side and use the value without exposing it.
+
+interface CredentialHandle {
+  fields: { username?: string; password?: string; totpSecret?: string; notes?: string };
+  expiresAt: number;
+  name: string;
+}
+const _credentialHandles = new Map<string, CredentialHandle>();
+const HANDLE_TTL_MS = 60_000;
+
+function newHandle(): string {
+  // 16 bytes of crypto-random hex. Not predictable.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function pruneExpiredHandles(): void {
+  const now = Date.now();
+  for (const [k, v] of _credentialHandles) {
+    if (v.expiresAt <= now) _credentialHandles.delete(k);
+  }
+}
+
+function getHandle(handle: string): CredentialHandle | null {
+  pruneExpiredHandles();
+  return _credentialHandles.get(handle) ?? null;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Tool {
@@ -319,19 +353,23 @@ export const toolRegistry: Record<string, Tool> = {
       "Drive a native desktop app via keyboard, mouse, and window-focus operations. " +
       "Composable verbs: focus (bring an app to the foreground by title substring), " +
       "type (send keystrokes to whatever has focus), keys (press a key combo like " +
-      "['LeftControl','S']), click (mouse click at absolute screen coords). Every " +
-      "call goes through a rate limiter and audit log. Use sparingly — prefer " +
+      "['LeftControl','S']), click (mouse click at absolute screen coords), " +
+      "typeCredentialField (type a stored credential's field — username/password/totp — " +
+      "without ever exposing the plaintext; uses a handle from getCredential). " +
+      "Every call goes through a rate limiter and audit log. Use sparingly — prefer " +
       "Navigator for browser tasks since it's higher-level. Useful for native apps " +
       "(Notepad, Word, Photoshop, Spotify, etc.) where there's no API.",
     inputSchema:
-      `{"action": "focus" | "type" | "keys" | "click" | "windows",
+      `{"action": "focus" | "type" | "keys" | "click" | "windows" | "typeCredentialField",
         "titleSubstring": "string (focus only — case-insensitive substring match)",
         "text": "string (type only)",
         "keys": "string[] (keys only — e.g. ['LeftControl','S'])",
         "x": "number (click only — absolute screen X)",
         "y": "number (click only — absolute screen Y)",
         "button": "'left' | 'right' | 'middle' (click only, default 'left')",
-        "doubleClick": "boolean (click only, default false)"}`,
+        "doubleClick": "boolean (click only, default false)",
+        "handle": "string (typeCredentialField only — handle from getCredential)",
+        "field": "'username'|'password'|'totpSecret'|'notes' (typeCredentialField only)"}`,
     outputDescription:
       "{ok: boolean, message: string} — message describes what happened or why it failed. " +
       "For action='windows' returns {titles: string[], active: string|null}.",
@@ -372,9 +410,87 @@ export const toolRegistry: Record<string, Tool> = {
             doubleClick: !!input?.doubleClick,
           });
         }
+        case "typeCredentialField": {
+          const handle = String(input?.handle ?? "").trim();
+          const field = String(input?.field ?? "").trim() as keyof CredentialHandle["fields"];
+          if (!handle) throw new Error("typeCredentialField: handle is required");
+          if (!["username", "password", "totpSecret", "notes"].includes(field)) {
+            throw new Error("typeCredentialField: field must be username|password|totpSecret|notes");
+          }
+          const stash = getHandle(handle);
+          if (!stash) {
+            throw new Error("typeCredentialField: handle expired or invalid (handles live for 60s)");
+          }
+          const value = stash.fields[field];
+          if (!value) {
+            return { ok: false, message: `credential "${stash.name}" has no ${field}` };
+          }
+          // Type the secret. Result message DELIBERATELY says "[redacted]" so
+          // the planner context (which the LLM may see during replan) doesn't
+          // leak the value or even its length.
+          await native.typeText(value);
+          return { ok: true, message: `Typed credential.${field} for "${stash.name}" [redacted]` };
+        }
         default:
           throw new Error(`controlApp: unknown action '${action}'`);
       }
+    },
+  },
+
+  getCredential: {
+    name: "getCredential",
+    description:
+      "Look up a stored credential by name (e.g. 'amazon', 'github'). Returns a " +
+      "short-lived OPAQUE HANDLE plus non-secret metadata (which fields exist, " +
+      "the URL, the username if present). The handle expires in 60 seconds and " +
+      "can be passed to controlApp action='typeCredentialField' to type the " +
+      "actual value into the focused window. The plaintext password NEVER " +
+      "appears in the plan output — that's the point. Vault must be unlocked " +
+      "(user does this once per session via the Credentials Vault panel).",
+    inputSchema:
+      `{"name": "string (credential name as stored in the vault)",
+        "reason": "string (why you need it — logged for audit)"}`,
+    outputDescription:
+      "{handle: string, name: string, url: string|null, username: string|null, " +
+      "hasPassword: boolean, hasTotpSecret: boolean, hasNotes: boolean, expiresAt: number}. " +
+      "Pass the handle to controlApp.typeCredentialField to actually use the secret.",
+    execute: async (input: any) => {
+      const name = String(input?.name ?? "").trim();
+      const reason = String(input?.reason ?? "planner").trim() || "planner";
+      if (!name) throw new Error("getCredential: name is required");
+      const { getCredential, isUnlocked } = await import("./credentialVault.js");
+      if (!isUnlocked()) {
+        throw new Error(
+          "getCredential: vault is locked. The user must unlock it in the Credentials panel first.",
+        );
+      }
+      const cred = await getCredential({ name }, { reason });
+      pruneExpiredHandles();
+      const handle = newHandle();
+      _credentialHandles.set(handle, {
+        fields: {
+          username: cred.fields.username,
+          password: cred.fields.password,
+          totpSecret: cred.fields.totpSecret,
+          notes: cred.fields.notes,
+        },
+        expiresAt: Date.now() + HANDLE_TTL_MS,
+        name: cred.name,
+      });
+      return {
+        handle,
+        name: cred.name,
+        url: cred.url,
+        // Username is "low-secret" — most sites display it openly. Returning it
+        // lets the planner do "type username, then Tab, then typeCredentialField
+        // password". If you'd rather lock the username down too, treat it the
+        // same way as password and only expose via typeCredentialField.
+        username: cred.fields.username ?? null,
+        hasPassword: !!cred.fields.password,
+        hasTotpSecret: !!cred.fields.totpSecret,
+        hasNotes: !!cred.fields.notes,
+        expiresAt: Date.now() + HANDLE_TTL_MS,
+      };
     },
   },
 };
