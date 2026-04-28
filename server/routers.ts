@@ -4285,6 +4285,158 @@ const nativeControlRouter = router({
     }),
 });
 
+// ── Credential Vault Router ──────────────────────────────────────────────────
+// Encrypted per-site credentials. Master password is the only thing that ever
+// crosses the wire; derived key never leaves credentialVault.ts. We split
+// `password` and `oldPassword` from logged input so accidental telemetry
+// (or middleware that pretty-prints input) doesn't capture them.
+const credentialsRouter = router({
+  status: publicProcedure.query(async () => {
+    const { getStatus } = await import("./credentialVault.js");
+    return getStatus();
+  }),
+
+  setup: publicProcedure
+    .input(z.object({ password: z.string().min(8).max(512) }))
+    .mutation(async ({ input }) => {
+      const { setupMasterPassword } = await import("./credentialVault.js");
+      // Don't let `input` leak via tRPC error formatters: catch + sanitize.
+      try {
+        return await setupMasterPassword(input.password);
+      } catch (err) {
+        return { ok: false, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  unlock: publicProcedure
+    .input(z.object({ password: z.string().min(1).max(512) }))
+    .mutation(async ({ input }) => {
+      const { unlockVault } = await import("./credentialVault.js");
+      try {
+        return await unlockVault(input.password);
+      } catch (err) {
+        return { ok: false, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  lock: publicProcedure.mutation(async () => {
+    const { lockVault } = await import("./credentialVault.js");
+    lockVault();
+    return { ok: true };
+  }),
+
+  changeMasterPassword: publicProcedure
+    .input(
+      z.object({
+        oldPassword: z.string().min(1).max(512),
+        newPassword: z.string().min(8).max(512),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const { changeMasterPassword } = await import("./credentialVault.js");
+      try {
+        return await changeMasterPassword(input.oldPassword, input.newPassword);
+      } catch (err) {
+        return { ok: false, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  list: publicProcedure.query(async () => {
+    const { listCredentials } = await import("./credentialVault.js");
+    return listCredentials();
+  }),
+
+  get: publicProcedure
+    .input(
+      z.object({
+        id: z.number().int().positive().optional(),
+        name: z.string().min(1).max(200).optional(),
+        reason: z.string().min(1).max(500).optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const { getCredential } = await import("./credentialVault.js");
+      try {
+        const rec = await getCredential(
+          { id: input.id, name: input.name },
+          { reason: input.reason ?? "ui" },
+        );
+        return { ok: true as const, credential: rec };
+      } catch (err) {
+        return { ok: false as const, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  add: publicProcedure
+    .input(
+      z.object({
+        name: z.string().min(1).max(200),
+        url: z.string().max(2000).optional(),
+        tags: z.array(z.string().max(80)).max(20).optional(),
+        fields: z.object({
+          username: z.string().max(500).optional(),
+          password: z.string().max(2000).optional(),
+          totpSecret: z.string().max(500).optional(),
+          notes: z.string().max(4000).optional(),
+          extra: z.record(z.string(), z.string().max(1000)).optional(),
+        }),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const { addCredential } = await import("./credentialVault.js");
+      try {
+        return { ok: true as const, credential: await addCredential(input) };
+      } catch (err) {
+        return { ok: false as const, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  update: publicProcedure
+    .input(
+      z.object({
+        id: z.number().int().positive(),
+        name: z.string().min(1).max(200).optional(),
+        url: z.string().max(2000).nullable().optional(),
+        tags: z.array(z.string().max(80)).max(20).optional(),
+        fields: z
+          .object({
+            username: z.string().max(500).optional(),
+            password: z.string().max(2000).optional(),
+            totpSecret: z.string().max(500).optional(),
+            notes: z.string().max(4000).optional(),
+            extra: z.record(z.string(), z.string().max(1000)).optional(),
+          })
+          .optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const { updateCredential } = await import("./credentialVault.js");
+      try {
+        return { ok: true as const, credential: await updateCredential(input) };
+      } catch (err) {
+        return { ok: false as const, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  delete: publicProcedure
+    .input(z.object({ id: z.number().int().positive() }))
+    .mutation(async ({ input }) => {
+      const { deleteCredential } = await import("./credentialVault.js");
+      try {
+        return await deleteCredential(input.id);
+      } catch (err) {
+        return { ok: false, message: String(err).slice(0, 200) };
+      }
+    }),
+
+  audit: publicProcedure
+    .input(z.object({ limit: z.number().int().positive().max(500).default(100) }).optional())
+    .query(async ({ input }) => {
+      const { readAudit } = await import("./credentialVault.js");
+      return readAudit(input?.limit ?? 100);
+    }),
+});
+
 // ── App Router ────────────────────────────────────────────────────────────────
 export const appRouter = router({
   system: systemRouter,
@@ -4342,6 +4494,7 @@ export const appRouter = router({
   benchmarks: benchmarksRouter,
   tunnel: tunnelRouter,
   nativeControl: nativeControlRouter,
+  credentials: credentialsRouter,
 });
 
 export type AppRouter = typeof appRouter;
