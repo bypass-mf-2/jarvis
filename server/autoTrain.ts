@@ -21,7 +21,7 @@ function isReadOnlySql(sql: string): boolean {
   return trimmed.startsWith("SELECT") || trimmed.startsWith("PRAGMA") || trimmed.startsWith("EXPLAIN");
 }
 import { logger } from "./logger.js";
-import { ollamaChatBackground as ollamaChat, ollamaChatJson, JSON_MODEL } from "./ollama.js";
+import { ollamaChatBackground as ollamaChat, ollamaChatJson, getJsonModel } from "./ollama.js";
 import { recordEvent as recordImprovementEvent } from "./improvementFeed.js";
 import { isScraperEnabled } from "./scraper.js";
 
@@ -211,8 +211,22 @@ ${chunk.content.slice(0, 3000)}
 
 export async function generateTrainingFromChunks(
   limit = 50,
-  model: string = JSON_MODEL
+  model?: string
 ): Promise<{ attempted: number; inserted: number; skipped: number }> {
+  model = model ?? getJsonModel();
+  // Focus mode — LLM-driven synthetic Q/A generation competes with book
+  // writing. Skip; the next weekly autoTrain tick will catch up.
+  try {
+    const { isFocusActive, getFocusOwners } = await import("./focusMode.js");
+    if (isFocusActive()) {
+      await logger.info(
+        "autoTrain",
+        `Skipping synthetic generation — focus mode (${getFocusOwners().join(", ")})`
+      );
+      return { attempted: 0, inserted: 0, skipped: 0 };
+    }
+  } catch { /* focusMode optional */ }
+
   await logger.info(
     "autoTrain",
     `Generating synthetic training data from up to ${limit} knowledge chunks`
@@ -363,9 +377,110 @@ export async function exportTrainingData(
     throw new Error("No training examples found. Need at least 100 examples.");
   }
 
-  const jsonlData = examples.map((ex: any) =>
+  // Active learning: fold in user corrections as high-priority examples.
+  // Corrections are duplicated (3x by default) so the training loop sees
+  // them more often than ordinary rated examples. Marked usedForTraining
+  // after successful merge so the same correction doesn't keep stacking.
+  let correctionLines: string[] = [];
+  let mergedCorrectionIds: number[] = [];
+  try {
+    const { listCorrections, markCorrectionsUsedForTraining } = await import(
+      "./activeLearning.js"
+    );
+    const corrections = listCorrections(1000).filter(
+      (c: any) => !c.usedForTraining
+    );
+    const DUP_FACTOR = 3;
+    for (const c of corrections) {
+      // Try to reconstruct the instruction from the preceding user message,
+      // falling back to a synthetic one if the message is gone.
+      let instruction = "";
+      if (c.messageId) {
+        const userRow = sqliteRun(
+          `SELECT m2.content
+             FROM messages m1
+             JOIN messages m2 ON m2.conversationId = m1.conversationId
+                              AND m2.id < m1.id
+                              AND m2.role = 'user'
+            WHERE m1.id = ?
+            ORDER BY m2.id DESC
+            LIMIT 1`,
+          [c.messageId]
+        );
+        instruction = String(userRow[0]?.content ?? "");
+      }
+      if (!instruction) {
+        instruction =
+          (c.userFeedback && String(c.userFeedback)) ||
+          `Correct the following response: ${String(c.originalResponse).slice(0, 500)}`;
+      }
+      const line = JSON.stringify({
+        instruction,
+        output: String(c.correctedResponse),
+      });
+      for (let i = 0; i < DUP_FACTOR; i++) correctionLines.push(line);
+      mergedCorrectionIds.push(c.id);
+    }
+    if (correctionLines.length > 0) {
+      await logger.info(
+        "autoTrain",
+        `Merging ${mergedCorrectionIds.length} corrections (${correctionLines.length} lines with duplication) into training export`
+      );
+      markCorrectionsUsedForTraining(mergedCorrectionIds);
+    }
+  } catch (err) {
+    await logger.warn(
+      "autoTrain",
+      `Correction merge skipped (non-fatal): ${String(err)}`
+    );
+  }
+
+  // Distillation: cloud LLM (Groq Llama-70B / etc.) responses captured via
+  // smartChat. Trains the local model to mimic cloud quality on JARVIS's
+  // actual question patterns. Weighted 2x — between corrections (3x, very
+  // high-trust) and synthetic Q/A (1x).
+  let distillationLines: string[] = [];
+  let consumedDistillationIds: number[] = [];
+  try {
+    const { getUnconsumedBatch, markConsumed } = await import("./distillation.js");
+    const distillBatch = getUnconsumedBatch(500);
+    const DUP_FACTOR = 2;
+    for (const ex of distillBatch) {
+      let messages: Array<{ role: string; content: string }> = [];
+      try { messages = JSON.parse(ex.messagesJson); } catch { continue; }
+      // Take the LAST user message as the instruction. System prompts are
+      // omitted since the local model has different system context at runtime.
+      const userMessages = messages.filter((m) => m.role === "user");
+      const lastUser = userMessages[userMessages.length - 1];
+      if (!lastUser?.content || lastUser.content.length < 8) continue;
+      const line = JSON.stringify({
+        instruction: lastUser.content.slice(0, 4000),
+        output: ex.response.slice(0, 4000),
+      });
+      for (let i = 0; i < DUP_FACTOR; i++) distillationLines.push(line);
+      consumedDistillationIds.push(ex.id);
+    }
+    if (consumedDistillationIds.length > 0) {
+      await logger.info(
+        "autoTrain",
+        `Merging ${consumedDistillationIds.length} cloud-distillation examples (${distillationLines.length} lines with duplication) into training export`
+      );
+      markConsumed(consumedDistillationIds);
+    }
+  } catch (err) {
+    await logger.warn(
+      "autoTrain",
+      `Distillation merge skipped (non-fatal): ${String(err)}`
+    );
+  }
+
+  const exampleLines = examples.map((ex: any) =>
     JSON.stringify({ instruction: ex.instruction, output: ex.output })
-  ).join("\n");
+  );
+  // Order: corrections first (highest trust), then distillation (cloud-quality
+  // exemplars), then synthetic Q/A. Sits near the start of the epoch so LR
+  // warmup overweights the highest-signal examples.
+  const jsonlData = [...correctionLines, ...distillationLines, ...exampleLines].join("\n");
 
   const filename = category
     ? `training-${category}-${Date.now()}.jsonl`
@@ -374,7 +489,10 @@ export async function exportTrainingData(
   const filepath = path.join(TRAINING_DATA_DIR, filename);
   fs.writeFileSync(filepath, jsonlData);
 
-  await logger.info("autoTrain", `Exported ${examples.length} examples to ${filename}`);
+  await logger.info(
+    "autoTrain",
+    `Exported ${examples.length} examples + ${correctionLines.length} correction lines + ${distillationLines.length} distillation lines to ${filename}`
+  );
   return filepath;
 }
 
@@ -550,6 +668,14 @@ async function deployModel(modelName: string): Promise<void> {
 
   const { setSetting } = await import("./llmSettings.js");
   await setSetting("default_model", modelName);
+
+  // Hot-swap in-memory default so chat picks up new model without restart.
+  try {
+    const { setDefaultModel } = await import("./ollama.js");
+    setDefaultModel(modelName);
+  } catch (err) {
+    await logger.warn("autoTrain", `deployModel: ollama hot-swap failed: ${String(err)}`);
+  }
 }
 
 // ── Weekly Auto-Update ──────────────────────────────────────────────────────
@@ -644,16 +770,30 @@ let trainingInterval: ReturnType<typeof setInterval> | null = null;
 
 export function startAutoTraining(intervalMs = 7 * 24 * 60 * 60 * 1000): void {
   if (trainingInterval) return;
-  logger.info("autoTrain", "🤖 Auto-training enabled (runs weekly)");
+  logger.info("autoTrain", "🤖 Auto-training enabled (runs weekly via loraTrainer)");
 
-  // Do NOT kick off weeklyModelUpdate() on startup. The pipeline runs up to
-  // 50 sequential Ollama JSON calls for synthetic Q/A generation (pinning
-  // Ollama for 25-50 min) and then shells out to a Python training script
-  // that currently fails fast on most machines — boots would appear stuck
-  // for tens of minutes before any error surfaced. The interval timer below
-  // still runs it weekly, and weeklyModelUpdate() remains callable manually.
+  // Weekly cycle goes through loraTrainer.runTrainingCycle, NOT the older
+  // weeklyModelUpdate(). runTrainingCycle uses the held-out lora_eval_holdouts
+  // test set, an LLM-as-judge option, and enforces a 10pp margin gate before
+  // any model swap (loraTrainer.ts MIN_WIN_MARGIN). weeklyModelUpdate's old
+  // 5-hardcoded-query A/B with no margin would deploy any 1pp win and is
+  // kept around only for manual one-shot use via the training.trainNewModel
+  // router endpoint.
+  //
+  // No startup kick-off: synthetic Q/A generation can pin Ollama for 25-50
+  // min and Python training shells out unsupervised. The interval timer
+  // below runs it on schedule. Manual trigger: lora.runCycle tRPC endpoint.
   trainingInterval = setInterval(async () => {
-    await weeklyModelUpdate();
+    try {
+      const { runTrainingCycle } = await import("./loraTrainer.js");
+      const result = await runTrainingCycle({ useLlmJudge: false });
+      await logger.info(
+        "autoTrain",
+        `Weekly cycle #${result.runId}: ${result.status} — ${result.reason}`
+      );
+    } catch (err) {
+      await logger.error("autoTrain", `Weekly cycle threw: ${err}`);
+    }
   }, intervalMs);
 }
 
