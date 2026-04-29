@@ -18,3 +18,9 @@ entity-graph.json
 entity-graph.json.bak
 chroma-data/
 .manus-logs/
+
+# Auto-generated weekly reports (business ideas, etc.)
+reports/business-ideas/
+
+# Local backups of .git/ from manual safe-push procedures
+.git-backup-*.tar

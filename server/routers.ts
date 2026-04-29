@@ -4459,6 +4459,49 @@ const credentialsRouter = router({
     }),
 });
 
+// ── Business Ideas Router ────────────────────────────────────────────────────
+// User edits business-ideas.md at the project root. JARVIS researches each
+// idea weekly (web search + multi-hop retrieval + LLM synthesis → markdown
+// brief in reports/business-ideas/). Manual triggers via this router.
+const businessIdeasRouter = router({
+  /** Parse business-ideas.md and return the current list. */
+  list: publicProcedure.query(async () => {
+    const { parseIdeasFile } = await import("./businessIdeas.js");
+    return parseIdeasFile();
+  }),
+
+  /** List all generated reports, newest first. Read-only metadata. */
+  listReports: publicProcedure
+    .input(z.object({ limit: z.number().int().positive().max(500).default(50) }).optional())
+    .query(async ({ input }) => {
+      const { listAllReports } = await import("./businessIdeas.js");
+      return listAllReports(input?.limit ?? 50);
+    }),
+
+  /** Read one report's full markdown. */
+  readReport: publicProcedure
+    .input(z.object({ filename: z.string().min(1).max(200) }))
+    .query(async ({ input }) => {
+      const { readReport } = await import("./businessIdeas.js");
+      const body = readReport(input.filename);
+      return { filename: input.filename, body };
+    }),
+
+  /** Run research for ALL non-killed ideas. Long-running — can take 30+ min. */
+  runAll: publicProcedure.mutation(async () => {
+    const { runWeeklyResearch } = await import("./businessIdeas.js");
+    return runWeeklyResearch();
+  }),
+
+  /** Run research for a single idea by its slug id. */
+  runOne: publicProcedure
+    .input(z.object({ ideaId: z.string().min(1).max(100) }))
+    .mutation(async ({ input }) => {
+      const { runWeeklyResearch } = await import("./businessIdeas.js");
+      return runWeeklyResearch({ onlyId: input.ideaId });
+    }),
+});
+
 // ── App Router ────────────────────────────────────────────────────────────────
 export const appRouter = router({
   system: systemRouter,
@@ -4517,6 +4560,7 @@ export const appRouter = router({
   tunnel: tunnelRouter,
   nativeControl: nativeControlRouter,
   credentials: credentialsRouter,
+  businessIdeas: businessIdeasRouter,
 });
 
 export type AppRouter = typeof appRouter;
