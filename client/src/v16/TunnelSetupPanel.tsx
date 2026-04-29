@@ -31,7 +31,12 @@ interface TunnelState {
   jarvisPublicUrl: string | null;
 }
 
-const TRPC_TIMEOUT_MS = 8000;
+// Default timeout per call. Most reads (tunnel.state, tunnel.ping) finish in
+// under a second. Mutations that shell out to cloudflared / winget can take
+// 10-30s on Windows because of Defender/SmartScreen scanning, slow disk, or
+// just winget's own startup latency. 30s is generous enough to cover those
+// while still catching genuinely-stuck calls.
+const TRPC_TIMEOUT_MS = 30_000;
 
 async function trpcRead(res: Response): Promise<any> {
   // Defensive — if v15 is unreachable the Vite proxy can return 502 with
