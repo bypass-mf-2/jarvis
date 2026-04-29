@@ -332,13 +332,18 @@ export async function runWeeklyResearch(
 ): Promise<WeeklyRunResult> {
   const startedAt = Date.now();
   const ideas = parseIdeasFile();
+  // Per Trevor (2026-04-29): "they should all be valued the same and have the
+  // same research for it. nothing should be skipped, it is my ai and my decision."
+  // So we no longer filter by status — every parsed idea gets researched.
+  // The Status field is now organizational (lets the user see which are active /
+  // exploring / shelved at a glance) and doesn't affect what runs.
   const targetIdeas = options.onlyId
     ? ideas.filter((i) => i.id === options.onlyId)
-    : ideas.filter((i) => i.status !== "killed");
+    : ideas;
 
   await logger.info(
     "businessIdeas",
-    `Starting research run — ${targetIdeas.length} ideas (${ideas.length} total in file, ${ideas.length - targetIdeas.length} skipped/killed)`,
+    `Starting research run — ${targetIdeas.length} ideas (${ideas.length} total in file)`,
   );
 
   const reports: IdeaReport[] = [];
@@ -383,7 +388,7 @@ export async function runWeeklyResearch(
     completedAt,
     totalIdeas: ideas.length,
     researched: reports.length,
-    skipped: ideas.length - targetIdeas.length,
+    skipped: ideas.length - targetIdeas.length, // always 0 unless onlyId narrows
     failed,
     reports,
     errors,
