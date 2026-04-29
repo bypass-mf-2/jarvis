@@ -68,23 +68,37 @@ Additionally there is a lot better absorption through audio and images, than jus
 Tags: ai, personal-ai, b2c, b2b
 Status: active
 
-# JARVIS v10 — Personal AI Operating System
+# JARVIS v16 — Falcon UI (always-on desktop agent)
 
-A fully autonomous AI system with **34 specialized agents**, **DeepSeek-R1 reasoning**, **chat branching**, **curiosity-driven learning**, **4-pass book generation**, browser automation, stock trading, and cross-domain expertise across engineering, law, history, Catholicism, finance, and more. Runs locally on commodity hardware. No cloud dependency required.
+A fully autonomous AI system wrapped in an always-on desktop agent that listens for "Hey JARVIS," auto-starts itself on Windows login, drives both browsers and native apps, types stored credentials without ever leaking the plaintext to its own LLM, and reaches your phone through your own Cloudflare-tunneled domain. Runs locally on commodity hardware. No cloud dependency required.
 
-**Current intelligence rating: 7-7.5/10 (junior professional tier)** — up from 4.5/10 in v7.7. Crosses the threshold from "impressive demo" to "genuine productivity tool."
-
-(Original v10 README description preserved as Trevor wrote it. Note: project is now at v16 — see project's actual README.md and CLAUDE.md for current state. Tracking here so weekly research surfaces competitor moves, pricing signals, and news that affect positioning.)
+**Current intelligence rating: 8.7/10 (adult-to-expert, useful agent territory)** — up from 8.3 in v15, 7-7.5 in v10, 4.5 in v7.7. v15→v16 is a reach + execution upgrade, not a raw-IQ one: same base LLM, but the surface JARVIS can act on changed dramatically.
 
 ### Core Intelligence (the brain)
-- **34-Agent Swarm** — Researchers, analysts, coders, planners, executors, memory keepers, QA, security, creative, knowledge, operations, finance, and maintenance specialists working in parallel
-- **DeepSeek-R1 Reasoning** — Dedicated reasoning model with native `<think>` step-by-step deliberation. Auto-routes math, logic, analysis, planning, and multi-step queries.
-- **Multi-Hop Knowledge Graph RAG** — Vector search (ChromaDB) + entity graph traversal (2 hops) + re-ranking by vector/entity/graph centrality. 96k+ entities, 572k+ connections.
-- **Reflection Layer** — Every major tool call gets post-hoc LLM evaluation. Past lessons injected into future related queries.
-- **Goal Persistence** — Long-term goals tracked across conversations. LLM auto-decomposes into subtasks with deadlines.
-- **Active Learning** — Hedge-word detector auto-logs confused responses. Weekly weakness-topic scan triggers targeted scraping. Corrections weighted 3× in auto-training.
-- **Unknown Scheduler (Curiosity-Driven)** — Daily 3-phase cycle: detect weaknesses from 4 signals → LLM generates targeted search queries → injects URLs into crawl frontier → tracks effectiveness → promotes persistent weaknesses to permanent scrape sources.
-- **Tool Composition / Planner** — Tool registry. LLM generates JSON plan → executes with variable passing → per-step retry + failure replan.
+- **Multi-Hop Knowledge Graph RAG** — vector search (ChromaDB) + entity graph traversal (2 hops) + re-ranking by vector/entity/graph centrality. ~1M chunks, 1.58M entities, 11.6M relationships in SQLite. 11 entity types (person, org, tech, engineering, legal, historical, religious, health, physics, named_entity, concept).
+- **smartChat routing** — heavy intents (book_writing, planner, reasoning, self_evaluate) auto-route to cloud Groq Llama-70B when configured; everything else local. Mutable default model so a winning LoRA cycle takes effect on the next chat turn without restart.
+- **DeepSeek-R1 Reasoning** — auto-routed for math, logic, analysis, planning, multi-step queries.
+- **Reflection Layer** — every major tool call gets post-hoc LLM evaluation. Past lessons injected into future related queries.
+- **Goal Persistence** — long-term goals tracked across conversations. LLM auto-decomposes into subtasks with deadlines.
+- **Persistent Opinions / Bias System** — JARVIS holds positions on topics with confidence scores + audit trails. User-locked overrides hard-locked from synthesis displacement. Re-synthesizes stale opinions every 24h.
+- **Distillation Pipeline** — every successful cloud-LLM call captured as training example. Local 8B model fine-tunes weekly on Trevor's actual questions answered by a strong teacher.
+- **LoRA Loop Closure** — weekly auto-trainer through `runTrainingCycle` with held-out test set + 10pp margin gate. Wins auto-deploy + hot-swap; losses archive.
+- **Active Learning** — hedge-word detector auto-logs confused responses → auto-form opinions. Corrections weighted 3× in auto-training. Curiosity-driven Unknown Scheduler (9 signals) injects URLs into crawl frontier daily.
+- **Tool Composition / Planner** — registry of 12+ tools (image, notify, calendar, controlApp, getCredential, plan, ...). LLM generates JSON plan → executes with variable passing → per-step retry + failure replan.
+
+### v16 Falcon UI (the body)
+- **Two-window Electron shell** — wake overlay + dedicated panel window. Both real OS windows (drag, resize, taskbar entry, always-on-top, minimize away).
+- **Wake word "Hey JARVIS"** — browser SpeechRecognition, opt-in via tray. Phrase match → fire wake → voice mode auto-starts recording, auto-stops on 1.5s silence.
+- **Voice mode** — click-to-toggle, VAD auto-stop, live volume bar, tap-to-interrupt during TTS. Whisper STT → smartChat → cloned-voice TTS, one round trip.
+- **Auto-spawn v15 from v16** — if localhost:3000 isn't reachable when wake fires, v16 spawns the backend, polls until reachable, continues. "Hey JARVIS" works from a fully cold state.
+- **Windows login auto-start** — tray toggle. v16 launches silently to system tray on every login, listener always live.
+- **Cloudflare Tunnel wizard** — 9-step admin panel. Walks through cloudflared install, browser auth, named tunnel, locked-or-open exposure mode (default: only `/api/notify/action.*` and OAuth callback paths exposed), DNS route, Windows service install, public-URL ping verification.
+- **Native UI control** — nut-js-backed keyboard / mouse / window-focus operations exposed via `nativeControl.*` tRPC + `controlApp` planner tool. Rate-limited (30/60s), blocklist for dangerous combos, audit log.
+- **Encrypted credential vault** — Argon2id KDF + XChaCha20-Poly1305 AEAD via libsodium. Master-password setup/unlock/lock, auto-lock after 30 min idle, master-password rotation that re-encrypts the entire vault in one transaction. Plaintext never enters the planner's step-output context — `getCredential` returns an opaque 60s-TTL handle, `controlApp.typeCredentialField` resolves it server-side and types via nut-js so the LLM never sees the password even during replanning.
+- **Phone notifications phase 2** — categorized topics (alerts/goals/trades/autonomous/reminders/calendar/general), per-category batching with digests, ntfy action buttons, slash-command reply listener (`/help`, `/goals`, `/status`, `/complete`, `/pause`, `/resume`, `/quiet`).
+- **Per-app memory** — keyed by focused-app id. "Last time you were in Photoshop you were sharpening the V16 hero shot."
+- **OCR + ask-about-screen + ambient recall** — desktopCapturer → tesseract.js → smartChat. Ambient recall is opt-in 10-min digests for "what was I doing at 2pm" later queries.
+- **Workflows** — 8 built-in (research, debug-stacktrace, shopping, summarize-pdf, compare-prices, track-stock, email-draft, plan-trip), with chaining, recurrence, and persisted run history.
 
 ### Pricing tiers (envisioned)
 - Personal License (self-hosted): $499 one-time
@@ -98,6 +112,12 @@ A fully autonomous AI system with **34 specialized agents**, **DeepSeek-R1 reaso
 - White-label Licensing: $50k-250k one-time
 - Book Writer SaaS: $49/mo
 - Finance SaaS (Brokerage overlay): $79/mo
+
+### Knowledge base (live)
+~1M chunks · 26k+ unique source URLs · ~690 scrape sources · 100k+ frontier URLs queued · 200+ MB entity graph (SQLite-backed: 1.58M entities, 11.4M chunk links, 11.6M relationships).
+
+### v17 roadmap (next)
+Cross-device + mobile companion + GPU server offload + image-based element targeting for native UI + visual "what JARVIS is about to do" overlay + cross-app workflows + multi-tenant Docker + Stripe billing.
 
 ## Sound Polarization for Noise Cancellation
 Tags: hardware, consumer, audio, deep-tech
