@@ -31,25 +31,41 @@ interface TunnelState {
   jarvisPublicUrl: string | null;
 }
 
+const TRPC_TIMEOUT_MS = 8000;
+
+async function trpcRead(res: Response): Promise<any> {
+  // Defensive — if v15 is unreachable the Vite proxy can return 502 with
+  // non-JSON body; if it's reachable but slow we still want a useful error.
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from /api/trpc (HTTP ${res.status}). Is the v15 server running on http://localhost:3000? \`pnpm dev\` in the project root.`);
+  }
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Non-JSON response from /api/trpc (HTTP ${res.status}). First 100 chars: ${text.slice(0, 100)}`);
+  }
+  if (data?.[0]?.error) throw new Error(data[0].error?.json?.message ?? "tRPC error");
+  return data?.[0]?.result?.data?.json;
+}
+
 const trpc = {
   async query(path: string, input?: unknown): Promise<any> {
     const url = `/api/trpc/${path}?batch=1&input=${encodeURIComponent(
       JSON.stringify({ "0": { json: input ?? null } })
     )}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (data?.[0]?.error) throw new Error(data[0].error?.json?.message ?? "tRPC error");
-    return data?.[0]?.result?.data?.json;
+    const r = await fetch(url, { signal: AbortSignal.timeout(TRPC_TIMEOUT_MS) });
+    return trpcRead(r);
   },
   async mutate(path: string, input?: unknown): Promise<any> {
     const r = await fetch(`/api/trpc/${path}?batch=1`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ "0": { json: input ?? {} } }),
+      signal: AbortSignal.timeout(TRPC_TIMEOUT_MS),
     });
-    const data = await r.json();
-    if (data?.[0]?.error) throw new Error(data[0].error?.json?.message ?? "tRPC error");
-    return data?.[0]?.result?.data?.json;
+    return trpcRead(r);
   },
 };
 
