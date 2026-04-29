@@ -191,19 +191,23 @@ export function App() {
   }
 
   if (state.phase === "panel") {
-    // Tray-driven full-window panels. No backdrop blur — panels are
-    // standalone tools the user reads + interacts with.
+    // Tray-driven full-window panels. Header sticks to the top; content
+    // below scrolls when it overflows the window. Without explicit
+    // overflow-y here the html/body's `overflow: hidden` (set for the
+    // wake overlay) clips long panels instead of scrolling them.
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex flex-col h-screen bg-background text-foreground">
         <PanelHeader panel={state.panel} onClose={onDismiss} />
-        {state.panel === "workflows" && <WorkflowPanel />}
-        {state.panel === "memory" && <PerAppMemoryPanel />}
-        {state.panel === "settings" && <SettingsPanel />}
-        {state.panel === "phone" && <PhonePanel />}
-        {state.panel === "opinions" && <OpinionsPanel />}
-        {state.panel === "distillation" && <DistillationPanel />}
-        {state.panel === "tunnel" && <TunnelSetupPanel />}
-        {state.panel === "credentials" && <CredentialsPanel />}
+        <div className="flex-1 overflow-y-auto">
+          {state.panel === "workflows" && <WorkflowPanel />}
+          {state.panel === "memory" && <PerAppMemoryPanel />}
+          {state.panel === "settings" && <SettingsPanel />}
+          {state.panel === "phone" && <PhonePanel />}
+          {state.panel === "opinions" && <OpinionsPanel />}
+          {state.panel === "distillation" && <DistillationPanel />}
+          {state.panel === "tunnel" && <TunnelSetupPanel />}
+          {state.panel === "credentials" && <CredentialsPanel />}
+        </div>
       </div>
     );
   }

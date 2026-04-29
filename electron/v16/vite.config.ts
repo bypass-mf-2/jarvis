@@ -47,5 +47,16 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Renderer is served by Vite on :5173 but the tRPC endpoints + REST routes
+    // live on the v15 server at :3000. Without this proxy every panel that
+    // hits /api/* from the renderer gets a 404 from Vite (returning HTML for
+    // unknown paths) and the JSON parse fails with "Unexpected end of JSON
+    // input." Was the cause of the Cloudflare Tunnel install button error.
+    proxy: {
+      "/api": {
+        target: process.env.JARVIS_SERVER_URL ?? "http://localhost:3000",
+        changeOrigin: true,
+      },
+    },
   },
 });
