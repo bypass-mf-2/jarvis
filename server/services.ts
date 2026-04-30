@@ -1058,11 +1058,11 @@ export async function startBackgroundServices(): Promise<void> {
   // idea, generates a markdown brief in reports/business-ideas/, fires a
   // phone notification on completion.
   //
-  // Trevor wants this to fire on startup AND every 7 days (his call —
-  // "should start researching today on startup then every 7 days").
-  // 90s post-boot delay so the server is fully responsive before the
-  // long Ollama-pinning run begins.
-  const businessIdeasRun = async () => {
+  // Weekly only. Startup kick-off removed 2026-04-30 — first run had landed
+  // 24h+ ago, every subsequent boot would re-pin Ollama for 30+ min and
+  // queue every other request behind it. Use businessIdeas.runAll tRPC
+  // endpoint or the runOne mutation if you want to fire a cycle on demand.
+  setInterval(async () => {
     try {
       const { runWeeklyResearch } = await import("./businessIdeas.js");
       const result = await runWeeklyResearch();
@@ -1071,12 +1071,10 @@ export async function startBackgroundServices(): Promise<void> {
         `Business-ideas research: ${result.researched}/${result.totalIdeas} ideas researched (${result.failed} failed)`,
       );
     } catch (err) {
-      await logger.warn("services", `Business-ideas run failed: ${err}`);
+      await logger.warn("services", `Business-ideas weekly run failed: ${err}`);
     }
-  };
-  setTimeout(businessIdeasRun, 90_000).unref(); // first run 90s after boot
-  setInterval(businessIdeasRun, 7 * 24 * 60 * 60 * 1000).unref(); // every 7 days thereafter
-  await logger.info("services", "✅ Business-ideas research scheduled (90s after boot, then weekly)");
+  }, 7 * 24 * 60 * 60 * 1000).unref();
+  await logger.info("services", "✅ Business-ideas research scheduled (weekly, no startup kick-off)");
 
   // Load the entity graph from disk (entity-graph.json). Must happen before
   // the backfill and before any chat queries that use the inference engine.
