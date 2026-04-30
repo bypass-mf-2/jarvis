@@ -4502,6 +4502,93 @@ const businessIdeasRouter = router({
     }),
 });
 
+// ── Whiteboard Router ────────────────────────────────────────────────────────
+// Drawn-notes UI in Home.tsx. Two-level: subjects hold pages, pages hold a
+// PNG dataURL of whatever the user drew. Auto-save fires from the canvas
+// component on stroke end, debounced.
+const whiteboardRouter = router({
+  listSubjects: publicProcedure.query(async () => {
+    const { listSubjects } = await import("./whiteboard.js");
+    return listSubjects();
+  }),
+  createSubject: publicProcedure
+    .input(z.object({ name: z.string().min(1).max(120), color: z.string().max(40).optional() }))
+    .mutation(async ({ input }) => {
+      const { createSubject } = await import("./whiteboard.js");
+      return createSubject(input);
+    }),
+  renameSubject: publicProcedure
+    .input(z.object({
+      id: z.number().int().positive(),
+      name: z.string().min(1).max(120).optional(),
+      color: z.string().max(40).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { renameSubject } = await import("./whiteboard.js");
+      renameSubject(input);
+      return { ok: true };
+    }),
+  deleteSubject: publicProcedure
+    .input(z.object({ id: z.number().int().positive() }))
+    .mutation(async ({ input }) => {
+      const { deleteSubject } = await import("./whiteboard.js");
+      deleteSubject(input.id);
+      return { ok: true };
+    }),
+
+  listPages: publicProcedure
+    .input(z.object({ subjectId: z.number().int().positive() }))
+    .query(async ({ input }) => {
+      const { listPages } = await import("./whiteboard.js");
+      return listPages(input.subjectId);
+    }),
+  getPage: publicProcedure
+    .input(z.object({ id: z.number().int().positive() }))
+    .query(async ({ input }) => {
+      const { getPage } = await import("./whiteboard.js");
+      return getPage(input.id);
+    }),
+  createPage: publicProcedure
+    .input(z.object({
+      subjectId: z.number().int().positive(),
+      title: z.string().max(200).optional(),
+      // 6 MB cap on imageData — a 1200x800 PNG is typically <500 KB. 6 MB
+      // gives headroom for very dense or large pages while still bounding
+      // the request size. Larger drawings should split across pages.
+      imageData: z.string().max(6 * 1024 * 1024).optional(),
+      width: z.number().int().min(200).max(8000).optional(),
+      height: z.number().int().min(200).max(8000).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { createPage } = await import("./whiteboard.js");
+      return createPage(input);
+    }),
+  updatePage: publicProcedure
+    .input(z.object({
+      id: z.number().int().positive(),
+      title: z.string().max(200).optional(),
+      imageData: z.string().max(6 * 1024 * 1024).optional(),
+      pageOrder: z.number().int().min(0).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { updatePage } = await import("./whiteboard.js");
+      updatePage(input);
+      return { ok: true };
+    }),
+  deletePage: publicProcedure
+    .input(z.object({ id: z.number().int().positive() }))
+    .mutation(async ({ input }) => {
+      const { deletePage } = await import("./whiteboard.js");
+      deletePage(input.id);
+      return { ok: true };
+    }),
+
+  stats: publicProcedure.query(async () => {
+    const { getStats } = await import("./whiteboard.js");
+    return getStats();
+  }),
+});
+
 // ── App Router ────────────────────────────────────────────────────────────────
 export const appRouter = router({
   system: systemRouter,
@@ -4561,6 +4648,7 @@ export const appRouter = router({
   nativeControl: nativeControlRouter,
   credentials: credentialsRouter,
   businessIdeas: businessIdeasRouter,
+  whiteboard: whiteboardRouter,
 });
 
 export type AppRouter = typeof appRouter;
