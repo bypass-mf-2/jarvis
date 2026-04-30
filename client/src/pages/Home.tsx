@@ -783,6 +783,30 @@ export default function Home() {
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Whiteboard → chat bridge. When the whiteboard fires "To chat", we
+  // convert the dataURL to a File and prepend it to the attached files,
+  // open the chat panel, and toast a hint. The event is fired by
+  // components/Whiteboard.tsx — kept loose-coupled via CustomEvent so the
+  // whiteboard component doesn't need to know chat-input internals.
+  useEffect(() => {
+    const handler = async (e: Event) => {
+      const ev = e as CustomEvent<{ dataUrl: string }>;
+      if (!ev.detail?.dataUrl) return;
+      try {
+        const blob = await (await fetch(ev.detail.dataUrl)).blob();
+        const file = new File([blob], `whiteboard-${Date.now()}.png`, { type: "image/png" });
+        setAttachedFiles((prev) => [...prev, file]);
+        setSidePanel("chat");
+        setSidebarOpen(true);
+        toast.success("Whiteboard image attached — write a prompt and send.");
+      } catch (err) {
+        toast.error(`Couldn't attach whiteboard image: ${String(err).slice(0, 80)}`);
+      }
+    };
+    window.addEventListener("jarvis:whiteboard-to-chat", handler);
+    return () => window.removeEventListener("jarvis:whiteboard-to-chat", handler);
+  }, []);
+
   const uploadAttachedFiles = useCallback(async (files: File[]): Promise<string[]> => {
     const summaries: string[] = [];
     for (const file of files) {
